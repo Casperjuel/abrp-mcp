@@ -100,12 +100,13 @@ tied to your account, so reading it leaks nothing. It's the fastest way to try t
    needed to list the cars saved on your account.)
 4. Use it as `ABRP_API_KEY` / the `X-API-KEY` header.
 
-> ⚠️ **It's public, but it's not free — it bills Iternio.** Every plan made with this key is charged
-> to *Iternio's own account*, not yours. That's fine for a quick personal try, but please don't
-> build anything that routes real volume through it: at scale it just gets the key rate-limited or
-> rotated, and it's not fair to Iternio. **If you use this for real, get your own key (option 1).**
-> Don't bake this key into a public deployment — the hosted instance deliberately holds no key and
-> asks each user for their own.
+> ⚠️ **It's public, but it's still Iternio's key — for their own app.** Making plans with it uses
+> Iternio's infrastructure, and it's metered/rate-limited for *their* app's traffic — so running an
+> outside project through it isn't really sanctioned, and at any real volume it just gets the key
+> rate-limited or rotated. Fine for a quick personal try; **if you use this for real, get your own
+> key (option 1).** Don't bake this key into a public deployment — the hosted instance deliberately
+> holds no key and asks each user for their own. (With your *own* key, the `/plan` endpoint is
+> billed per plan; everything else is free.)
 
 ## Credentials
 
