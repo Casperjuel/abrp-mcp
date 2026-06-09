@@ -1,26 +1,28 @@
-# VHS tape — what abrp-mcp looks like from an MCP client (Claude).
-# The fixture has the whole session (prompt + tool call + answer) baked in,
-# so the GIF is deterministic and needs no API key.
+# VHS tape — a Claude-style thread planning an EV family road trip.
+# Light "paper" theme + window bar to evoke Claude. Replays a baked-in
+# conversation (fixtures/claude-thread.sh), so it needs no API key.
 #
 #   vhs docs/demos/claude.tape
 
 Output docs/demos/claude.gif
 
 Set Shell bash
-Set FontSize 14
-Set Width 1120
-Set Height 680
-Set Theme "Catppuccin Mocha"
-Set Padding 24
-Set BorderRadius 10
+Set FontSize 15
+Set Width 1080
+Set Height 1120
+Set Padding 30
+Set Margin 40
+Set MarginFill "#E8E5DC"
+Set BorderRadius 12
+Set WindowBar Colorful
+Set TypingSpeed 1ms
+Set Theme { "name": "claude", "background": "#F7F6F1", "foreground": "#2D2A26", "cursor": "#D97757", "selection": "#E7E4DA", "black": "#2D2A26", "red": "#C2410C", "green": "#3F6212", "yellow": "#A16207", "blue": "#1D4ED8", "magenta": "#A21CAF", "cyan": "#0E7490", "white": "#2D2A26", "brightBlack": "#8A7F70", "brightRed": "#D97757", "brightGreen": "#3F6212", "brightYellow": "#A16207", "brightBlue": "#1D4ED8", "brightMagenta": "#A21CAF", "brightCyan": "#0E7490", "brightWhite": "#2D2A26" }
 
 Hide
 Type 'export PS1=""'
 Enter
-Type 'OUT=$(cat docs/demos/fixtures/claude-session.txt)'
+Type 'clear; bash docs/demos/fixtures/claude-thread.sh'
 Enter
-Type 'clear; printf "%s\n" "$OUT"'
-Enter
-Sleep 400ms
+Sleep 500ms
 Show
-Sleep 9s
+Sleep 10s
