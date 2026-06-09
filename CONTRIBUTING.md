@@ -18,6 +18,8 @@ pnpm install
 cp .env.example .env        # set OAUTH_SECRET; add ABRP_API_KEY for a keyless local run
 pnpm dev                    # http://localhost:3000  (or https with mkcert certs — see README)
 pnpm typecheck              # tsc --noEmit — please keep this green
+pnpm test                   # vitest
+pnpm lint                   # biome check  (pnpm format to auto-fix)
 ```
 
 Quick smoke test:
@@ -45,13 +47,13 @@ curl -s -X POST localhost:3000/mcp \
 1. Add a method to `AbrpClient` in `src/abrp.ts` for the endpoint.
 2. Register the tool in `src/tools.ts` with a clear `description` and a Zod `inputSchema`.
 3. If the response can be large, slim it (see `slimPlan` for why — Claude caps tool results at 1 MB).
-4. `pnpm typecheck`, then test it via an MCP client or the `curl` above.
+4. `pnpm typecheck && pnpm test`, then try it via an MCP client or the `curl` above.
 
 ## Pull requests
 
 - Branch off `main`, keep PRs focused, and describe what and why.
-- Keep `pnpm typecheck` passing. Code is formatted/linted with [Biome](https://biomejs.dev)
-  (`pnpm dlx @biomejs/biome check --write .`).
+- Keep `pnpm typecheck`, `pnpm test` and `pnpm lint` green — CI runs all three on PRs. Code is
+  formatted/linted with [Biome](https://biomejs.dev); run `pnpm format` to auto-fix.
 - Match the surrounding style — small, well-commented, dependency-light.
 - For anything large (new auth model, big refactor), open an issue first so we can align.
 
