@@ -282,8 +282,36 @@ const chargingSchema = z
     realTimeStatus: z.boolean().optional().describe("Plan with live charger availability (premium; must be enabled on the key)."),
     excludedChargerIds: z.array(z.number().int()).optional().describe("Charger ids to exclude from the plan."),
     preferredMinimumStallCount: z.number().int().min(1).optional().describe("Soft preference for a minimum stall count per charger."),
+    preferredFeatures: z
+      .array(z.enum(["TRAILER_FRIENDLY", "DOG_FRIENDLY", "HAS_PLAYGROUND", "HAS_OPEN_RESTROOMS", "PLUG_AND_CHARGE"]))
+      .optional()
+      .describe(
+        "Bias toward chargers with these amenities (soft preference, not a hard filter). TRAILER_FRIENDLY = caravan/trailer-accessible (pull-through), HAS_PLAYGROUND, HAS_OPEN_RESTROOMS, DOG_FRIENDLY, PLUG_AND_CHARGE.",
+      ),
+    preferredTags: z
+      .array(z.string())
+      .optional()
+      .describe("Bias toward chargers carrying these free-text tags (e.g. for food/restaurant nearby), soft preference."),
   })
   .describe("Charging constraints/preferences.");
+
+/** Map the friendly charging schema onto the API's ChargingOptions shape. */
+function toApiCharging(charging?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!charging) return undefined;
+  const { preferredFeatures, preferredTags, ...rest } = charging as {
+    preferredFeatures?: string[];
+    preferredTags?: string[];
+  } & Record<string, unknown>;
+  return {
+    ...rest,
+    ...(preferredFeatures?.length
+      ? { featurePreferences: preferredFeatures.map((feature) => ({ feature, preference: "PREFER" })) }
+      : {}),
+    ...(preferredTags?.length
+      ? { tagPreferences: preferredTags.map((tag) => ({ tag, preference: "PREFER" })) }
+      : {}),
+  };
+}
 
 const speedSchema = z
   .object({
@@ -387,7 +415,7 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
           ...(args.degradationFrac !== undefined ? { degradationFrac: args.degradationFrac } : {}),
           ...(args.configuration ? { configuration: args.configuration } : {}),
         },
-        ...(args.charging ? { charging: args.charging } : {}),
+        ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
         ...(args.speed ? { speed: args.speed } : {}),
         ...(args.avoid ? { avoid: args.avoid } : {}),
         ...(args.extra ?? {}),
@@ -448,6 +476,10 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
           .optional()
           .describe("Local time you set off each morning, HH:MM (default 09:00). Times are treated as local/CET."),
         currentSocFrac: z.number().min(0).max(1).optional().describe("Starting state of charge 0–1 (default 0.9)."),
+        configuration: z
+          .string()
+          .optional()
+          .describe("Consumption modifier for towing/load, e.g. 'TRAILER-SMALL', 'TRAILER-MEDIUM', 'TRAILER-LARGE' for a caravan."),
         charging: chargingSchema.optional(),
         speed: speedSchema.optional(),
         avoid: avoidSchema.optional(),
@@ -460,6 +492,7 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       departDate?: string;
       dailyDepartTime?: string;
       currentSocFrac?: number;
+      configuration?: string;
       charging?: Record<string, unknown>;
       speed?: Record<string, unknown>;
       avoid?: Record<string, unknown>;
@@ -469,8 +502,9 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         vehicle: {
           identifier: { type: "TYPECODE", value: args.typecode },
           ...(args.currentSocFrac !== undefined ? { currentSocFrac: args.currentSocFrac } : {}),
+          ...(args.configuration ? { configuration: args.configuration } : {}),
         },
-        ...(args.charging ? { charging: args.charging } : {}),
+        ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
         ...(args.speed ? { speed: args.speed } : {}),
         ...(args.avoid ? { avoid: args.avoid } : {}),
       };

@@ -48,6 +48,11 @@ access token). Point any OAuth-capable MCP client at the `/mcp` URL, or self-hos
 Planning tools return a `viewUrl` (`https://abetterrouteplanner.com/?plan_uuid=…`) so you can open
 the result in the ABRP web app or mobile app.
 
+**Towing & amenities.** Set the vehicle `configuration` (e.g. `TRAILER-SMALL/MEDIUM/LARGE`) to model
+a caravan's extra consumption, and bias stops toward amenities with
+`charging.preferredFeatures` — `TRAILER_FRIENDLY` (pull-through), `HAS_PLAYGROUND`,
+`HAS_OPEN_RESTROOMS`, `DOG_FRIENDLY`, `PLUG_AND_CHARGE` — or free-text `charging.preferredTags`.
+
 ## Getting an API key
 
 You need an Iternio Planning API key (the `X-API-KEY`). There are two ways to get one.
