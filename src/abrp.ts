@@ -201,6 +201,33 @@ export class AbrpClient {
   }
 
   /**
+   * The public catalogue of every ABRP vehicle model (v1, free). Returns a flat
+   * list of `{ name, typecode }`. Names look like "Tesla;Model Y;2020;Standard
+   * Range"; the typecode is what `/plan` expects (e.g. `tesla:my:19:bt36:none`).
+   */
+  async listCarModels(): Promise<Array<{ name: string; typecode: string }>> {
+    const apiKey = this.requireApiKey();
+    const res = await fetch(
+      `${this.v1BaseUrl}/tlm/get_carmodels_list?api_key=${encodeURIComponent(apiKey)}`,
+      { headers: { Accept: "application/json" } },
+    );
+    const data = await parseResponse<unknown>(res, "GET /1/tlm/get_carmodels_list");
+    const arr = Array.isArray(data)
+      ? data
+      : ((data as { result?: unknown })?.result as unknown);
+    if (!Array.isArray(arr)) return [];
+    // Each entry is a single-key object: { "<display name>": "<typecode>" }.
+    return arr.flatMap((entry) =>
+      entry && typeof entry === "object"
+        ? Object.entries(entry as Record<string, string>).map(([name, typecode]) => ({
+            name,
+            typecode,
+          }))
+        : [],
+    );
+  }
+
+  /**
    * Lightweight credential check: hits the free ref-cons endpoint for a known
    * public typecode. A 200/valid body means the API key works.
    */

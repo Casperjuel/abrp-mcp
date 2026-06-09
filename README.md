@@ -30,7 +30,9 @@ access token). Point any OAuth-capable MCP client at the `/mcp` URL, or self-hos
 | Tool | What it does | Auth |
 | --- | --- | --- |
 | `abrp_check_access` | Validate the API key against a free endpoint | API key |
+| `abrp_find_vehicle` | Search the model catalogue by name → exact `typecode` | API key |
 | `abrp_plan_route` | Plan an EV route with charging stops (friendly inputs) | API key |
+| `abrp_plan_trip` | Plan a long route split into daily legs (max-hours/day) + overnight stops | API key |
 | `abrp_plan_raw` | Plan with a full raw `PlanRequest` body | API key |
 | `abrp_list_vehicles` | List vehicles on your ABRP account + typecodes | API key + **session** |
 | `abrp_get_charge_curve` | Charge curve (power vs SoC) for a model at a charger | API key |
@@ -40,8 +42,11 @@ access token). Point any OAuth-capable MCP client at the `/mcp` URL, or self-hos
 | `abrp_search_chargers` | Find chargers near a coordinate | API key |
 | `abrp_send_telemetry` | Push live telemetry via the free v1 `/tlm/send` | API key + **user token** |
 
-> ⚠️ **Billing:** `abrp_plan_route` / `abrp_plan_raw` call Iternio's `/plan` endpoint, which is
-> **billed per successful plan**. Every other endpoint is free.
+> ⚠️ **Billing:** `abrp_plan_route` / `abrp_plan_trip` / `abrp_plan_raw` call Iternio's `/plan`
+> endpoint, which is **billed per successful plan**. Every other endpoint is free.
+
+Planning tools return a `viewUrl` (`https://abetterrouteplanner.com/?plan_uuid=…`) so you can open
+the result in the ABRP web app or mobile app.
 
 ## Getting an API key
 

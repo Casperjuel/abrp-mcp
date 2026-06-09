@@ -81,6 +81,101 @@ function slimLeg(leg: unknown): unknown {
   return out;
 }
 
+/** Attach a browser-viewable ABRP link built from the plan's persisted id. */
+function withViewUrl(result: unknown): unknown {
+  if (result && typeof result === "object") {
+    const r = result as Record<string, unknown>;
+    if (typeof r.planId === "string") {
+      return { viewUrl: `https://abetterrouteplanner.com/?plan_uuid=${r.planId}`, ...r };
+    }
+  }
+  return result;
+}
+
+// Process-lifetime cache of the (rarely-changing) car-model catalogue.
+let carModelsCache: { at: number; models: Array<{ name: string; typecode: string }> } | null = null;
+
+async function getCarModels(client: AbrpClient) {
+  const SIX_HOURS = 6 * 60 * 60 * 1000;
+  if (carModelsCache && Date.now() - carModelsCache.at < SIX_HOURS) return carModelsCache.models;
+  const models = await client.listCarModels();
+  carModelsCache = { at: Date.now(), models };
+  return models;
+}
+
+/**
+ * Split a plan's single best route into daily driving legs under a per-day
+ * drive-time cap, ending each day at a charger town (a natural overnight stop).
+ * Returns structured days plus a human-readable itinerary string.
+ */
+function summarizeTrip(result: unknown, maxDriveHoursPerDay: number) {
+  const route = (result as { routes?: Array<Record<string, unknown>> })?.routes?.[0];
+  const legs = (route?.legs as Array<Record<string, unknown>>) ?? [];
+  const planId = (result as { planId?: string })?.planId;
+  if (!legs.length) return result;
+
+  const capSec = maxDriveHoursPerDay * 3600;
+  const name = (o: Record<string, unknown>) =>
+    typeof o.name === "string" && o.name ? o.name : `${o.lat},${o.long}`;
+
+  type Day = { from: string; to: string; driveHours: number; distanceKm: number; chargeStops: number };
+  const days: Day[] = [];
+  let dayStart = legs[0]!.origin as Record<string, unknown>;
+  let driveSec = 0;
+  let distM = 0;
+  let stops = 0;
+
+  for (let i = 0; i < legs.length; i++) {
+    const leg = legs[i]!;
+    const drive = leg.driveDetails as Record<string, number> | undefined;
+    const legDrive = drive?.durationSec ?? 0;
+    const origin = leg.origin as Record<string, unknown>;
+    // Close the day before a leg that would push us over the cap.
+    if (driveSec > 0 && driveSec + legDrive > capSec) {
+      days.push({
+        from: name(dayStart),
+        to: name(origin),
+        driveHours: Math.round((driveSec / 3600) * 10) / 10,
+        distanceKm: Math.round(distM / 1000),
+        chargeStops: stops,
+      });
+      dayStart = origin;
+      driveSec = 0;
+      distM = 0;
+      stops = 0;
+    }
+    driveSec += legDrive;
+    distM += drive?.driveDistanceM ?? 0;
+    if (origin.type === "ADDED_CHARGER") stops++;
+  }
+  // Final day ends at the route's last origin (the destination).
+  const last = legs[legs.length - 1]!.origin as Record<string, unknown>;
+  days.push({
+    from: name(dayStart),
+    to: name(last),
+    driveHours: Math.round((driveSec / 3600) * 10) / 10,
+    distanceKm: Math.round(distM / 1000),
+    chargeStops: stops,
+  });
+
+  const totalKm = days.reduce((s, d) => s + d.distanceKm, 0);
+  const totalH = Math.round(days.reduce((s, d) => s + d.driveHours, 0) * 10) / 10;
+  const itinerary = [
+    `${totalKm} km · ${totalH} h driving · ${days.length} day(s) (max ${maxDriveHoursPerDay} h/day)`,
+    ...days.map(
+      (d, i) =>
+        `  Day ${i + 1}: ${d.from} → ${d.to} — ${d.driveHours} h, ${d.distanceKm} km, ${d.chargeStops} charge stop(s)`,
+    ),
+  ].join("\n");
+
+  return {
+    days,
+    summary: { totalKm, totalDriveHours: totalH, dayCount: days.length, maxDriveHoursPerDay },
+    itinerary,
+    ...(planId ? { viewUrl: `https://abetterrouteplanner.com/?plan_uuid=${planId}`, planId } : {}),
+  };
+}
+
 // --- Shared input shapes ----------------------------------------------------
 
 const destinationSchema = z
@@ -252,7 +347,7 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         ...(args.extra ?? {}),
       };
       const result = await getClient().plan(request);
-      return args.detail === "full" ? result : slimPlan(result);
+      return withViewUrl(args.detail === "full" ? result : slimPlan(result));
     }),
   );
 
@@ -272,11 +367,88 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
     },
     handler(async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
       const result = await getClient().plan(request);
-      return detail === "full" ? result : slimPlan(result);
+      return withViewUrl(detail === "full" ? result : slimPlan(result));
+    }),
+  );
+
+  server.registerTool(
+    "abrp_plan_trip",
+    {
+      title: "Plan a multi-day EV road trip",
+      description:
+        "Plan a long route and split it into daily driving legs under a maximum drive-time-per-day, each ending at a charger town that makes a natural overnight stop. Returns a day-by-day itinerary (human-readable `itinerary` text + structured `days`) and an ABRP `viewUrl`. Use this for road trips that span more than one day. Billed once per plan.",
+      inputSchema: {
+        destinations: z
+          .array(destinationSchema)
+          .min(2)
+          .describe("Ordered stops; first = origin, last = final destination. At least 2."),
+        typecode: z
+          .string()
+          .describe("Vehicle model typecode (use abrp_find_vehicle to look it up)."),
+        maxDriveHoursPerDay: z
+          .number()
+          .min(1)
+          .max(14)
+          .optional()
+          .describe("Cap on actual driving hours per day before an overnight stop (default 8)."),
+        currentSocFrac: z.number().min(0).max(1).optional().describe("Starting state of charge 0–1 (default 0.9)."),
+        charging: chargingSchema.optional(),
+        speed: speedSchema.optional(),
+        avoid: avoidSchema.optional(),
+      },
+    },
+    handler(async (args: {
+      destinations: DestinationInput[];
+      typecode: string;
+      maxDriveHoursPerDay?: number;
+      currentSocFrac?: number;
+      charging?: Record<string, unknown>;
+      speed?: Record<string, unknown>;
+      avoid?: Record<string, unknown>;
+    }) => {
+      const request: Record<string, unknown> = {
+        destinations: args.destinations.map(toApiDestination),
+        vehicle: {
+          identifier: { type: "TYPECODE", value: args.typecode },
+          ...(args.currentSocFrac !== undefined ? { currentSocFrac: args.currentSocFrac } : {}),
+        },
+        ...(args.charging ? { charging: args.charging } : {}),
+        ...(args.speed ? { speed: args.speed } : {}),
+        ...(args.avoid ? { avoid: args.avoid } : {}),
+      };
+      const result = await getClient().plan(request);
+      return summarizeTrip(result, args.maxDriveHoursPerDay ?? 8);
     }),
   );
 
   // --- Vehicles & models ---------------------------------------------------
+  server.registerTool(
+    "abrp_find_vehicle",
+    {
+      title: "Find a vehicle / typecode",
+      description:
+        "Search ABRP's vehicle-model catalogue by name to get the exact `typecode` that planning needs — e.g. query 'model y standard range' → tesla:my:19:bt36:none. ALWAYS use this to resolve a vehicle instead of guessing a typecode, since the wrong code changes range and charging. All matching terms must appear in the model name.",
+      inputSchema: {
+        query: z
+          .string()
+          .describe("Free-text search across model names, e.g. 'model y standard range', 'id.4 77', 'rivian r1s'."),
+        limit: z.number().int().min(1).max(50).optional().describe("Max matches to return (default 15)."),
+      },
+    },
+    handler(async ({ query, limit }: { query: string; limit?: number }) => {
+      const models = await getCarModels(getClient());
+      const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const matches = models
+        .filter((m) => {
+          const hay = m.name.toLowerCase();
+          return terms.every((t) => hay.includes(t));
+        })
+        .slice(0, limit ?? 15)
+        .map((m) => ({ name: m.name.replace(/;/g, " · "), typecode: m.typecode }));
+      return { query, matchCount: matches.length, totalModels: models.length, matches };
+    }),
+  );
+
   server.registerTool(
     "abrp_list_vehicles",
     {
