@@ -1,17 +1,17 @@
-❯ plan a route from Lund to Stockholm in my Rivian R1S — I'm at 82%
+❯ road trip in my Model Y towing the caravan — Roskilde down to Cinque Terre,
+  max 8 hours driving a day, leaving 09:00. plan the days for me.
 
-⏺ abrp_plan_route  ·  Lund → Stockholm  ·  rivian:r1s:21:135  ·  SoC 82%
+⏺ abrp_find_vehicle   "model y standard range"  →  tesla:my:19:bt36:none
+⏺ abrp_plan_trip      Roskilde → Riomaggiore · caravan (TRAILER-MEDIUM) · max 8 h/day
 
-⏺ Here's the trip — 607 km, about 7h 10m with two quick stops:
+⏺ 1,649 km over 3 days with the caravan, leaving 09:00 each morning:
 
-     Lund                        depart · 82%
-       │   245 km  ·  ~2h 10m
-     Nima Energy Skillingaryd    arrive 17%  →  leave 67%
-       │   charge 40 min  ·  62 kW
-       │   142 km  ·  ~1h 25m
-     Circle K Mantorp            arrive 31%  →  leave 70%
-       │   charge 31 min  ·  48 kW
-       │   220 km  ·  ~2h 10m
-     Stockholm                   arrive · 15%
+     Day 1 · Wed 22 Jul   09:00 → 18:00
+       Roskilde → Eichenzell (DE)        706 km · 7.4 h drive + 1.6 h charging
+     Day 2 · Thu 23 Jul   09:00 → 19:12
+       Eichenzell → Fiorenzuola (IT)     786 km · 7.8 h drive + 2.4 h charging
+     Day 3 · Fri 24 Jul   09:00 → 11:28
+       Fiorenzuola → Riomaggiore         157 km · 2.0 h drive + 0.5 h charging
 
-  Two stops, ~71 min charging total. Want me to prefer faster (150kW+) chargers?
+  Charge stops biased to trailer-friendly sites with playgrounds.
+  Open it in ABRP →  abetterrouteplanner.com/?plan_uuid=2-6a284e95…

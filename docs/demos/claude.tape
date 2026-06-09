@@ -8,8 +8,8 @@ Output docs/demos/claude.gif
 
 Set Shell bash
 Set FontSize 14
-Set Width 1080
-Set Height 560
+Set Width 1120
+Set Height 680
 Set Theme "Catppuccin Mocha"
 Set Padding 24
 Set BorderRadius 10
