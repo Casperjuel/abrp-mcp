@@ -1,13 +1,12 @@
-import { Hono } from "hono";
-import type { Context } from "hono";
 import { StreamableHTTPTransport } from "@hono/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Context } from "hono";
+import { Hono } from "hono";
 import { AbrpClient } from "./abrp.js";
-import { registerAbrpTools } from "./tools.js";
 import { renderLoginPage } from "./login-page.js";
 import {
-  ACCESS_TTL_SECONDS,
   type AbrpCredentials,
+  ACCESS_TTL_SECONDS,
   mintAccessToken,
   mintAuthCode,
   mintClientId,
@@ -18,6 +17,7 @@ import {
   readRefreshToken,
   verifyPkce,
 } from "./oauth.js";
+import { registerAbrpTools } from "./tools.js";
 
 /** Forbid caching of OAuth credential/token responses (RFC 6749 §5.1). */
 async function noStore(c: Context, next: () => Promise<void>) {
@@ -332,13 +332,11 @@ function validateAuthorizeParams(p: Record<string, string | undefined>): string 
   if (!p.client_id) return "Missing client_id.";
   if (!p.redirect_uri) return "Missing redirect_uri.";
   if (!p.code_challenge) return "Missing code_challenge (PKCE is required).";
-  if ((p.code_challenge_method ?? "S256") !== "S256")
-    return "Only code_challenge_method=S256 is supported.";
+  if ((p.code_challenge_method ?? "S256") !== "S256") return "Only code_challenge_method=S256 is supported.";
 
   const client = readClient(p.client_id);
   if (!client) return "Unknown or expired client_id.";
-  if (!client.redirectUris.includes(p.redirect_uri))
-    return "redirect_uri is not registered for this client.";
+  if (!client.redirectUris.includes(p.redirect_uri)) return "redirect_uri is not registered for this client.";
   return undefined;
 }
 
