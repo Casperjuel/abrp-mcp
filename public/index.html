@@ -16,9 +16,19 @@
     h1 { margin: 0; font-size: 1.9rem; color: #fff; letter-spacing: -.02em; }
     p { margin: 1rem 0; }
     .lede { color: #e7ecf3; font-size: 1.05rem; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfe0ff; }
-    .endpoint { margin: 1.5rem 0; }
-    ul { padding-left: 1.1rem; margin: 1.25rem 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .label { color: #8295b0; font-size: .85rem; margin: 2rem 0 .5rem; }
+    .copy {
+      display: flex; align-items: stretch; border: 1px solid #2c3a57; border-radius: 10px;
+      overflow: hidden; background: #0e1626;
+    }
+    .copy code { flex: 1; padding: .8rem 1rem; color: #cfe0ff; font-size: .95rem; overflow-x: auto; white-space: nowrap; }
+    .copy button {
+      border: 0; border-left: 1px solid #2c3a57; background: #16223b; color: #cfe0ff;
+      padding: 0 1.1rem; font: inherit; font-size: .9rem; cursor: pointer;
+    }
+    .copy button:hover { background: #1d2c4a; }
+    ul { padding-left: 1.1rem; margin: 1.5rem 0; }
     li { margin: .25rem 0; }
     a { color: #7fb0ff; }
     .note { color: #8295b0; font-size: .9rem; }
@@ -30,7 +40,11 @@
   <h1>abrp-mcp</h1>
   <p class="lede">Plan EV road trips by talking to an AI assistant — charging stops, state of charge and timings, powered by A Better Route Planner.</p>
 
-  <p class="endpoint">MCP endpoint: <code>https://abrp-mcp.vercel.app/mcp</code></p>
+  <div class="label">MCP endpoint</div>
+  <div class="copy">
+    <code id="url">https://abrp-mcp.vercel.app/mcp</code>
+    <button id="copy" type="button">Copy</button>
+  </div>
 
   <ul>
     <li>Route planning with charging stops, and multi-day trips</li>
@@ -39,7 +53,8 @@
     <li>Live telemetry</li>
   </ul>
 
-  <p class="note">Unofficial — not affiliated with Iternio. Bring your own ABRP API key; nothing is stored server-side.</p>
+  <p class="note">Unofficial — not affiliated with Iternio. Bring your own ABRP API key.</p>
+  <p class="note">No tracking, no analytics, no database — the server is stateless and stores nothing; your key is sealed into your own access token. It runs on Vercel (standard host logs only) and forwards planning requests to ABRP and to whichever AI client you connect. Want it fully private? Self-host and use a local LLM.</p>
 
   <hr />
   <footer>
@@ -47,5 +62,19 @@
     <a href="https://github.com/Casperjuel/abrp-mcp#getting-an-api-key">Get an API key</a> ·
     MIT
   </footer>
+
+  <script>
+    const btn = document.getElementById("copy");
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(document.getElementById("url").textContent.trim());
+        btn.textContent = "Copied";
+        setTimeout(() => (btn.textContent = "Copy"), 1500);
+      } catch {
+        btn.textContent = "Copy failed";
+        setTimeout(() => (btn.textContent = "Copy"), 1500);
+      }
+    });
+  </script>
 </body>
 </html>
