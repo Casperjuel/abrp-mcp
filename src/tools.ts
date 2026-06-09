@@ -103,69 +103,115 @@ async function getCarModels(client: AbrpClient) {
   return models;
 }
 
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** A naive clock for the trip, computed in UTC so the server timezone never leaks. */
+function tripClock(departDate: string, dayIndex: number, departMinutes: number) {
+  const base = new Date(`${departDate}T00:00:00Z`);
+  base.setUTCDate(base.getUTCDate() + dayIndex);
+  base.setUTCMinutes(departMinutes);
+  return base;
+}
+
+const fmtDate = (d: Date) =>
+  `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+const fmtTime = (d: Date) =>
+  `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+
 /**
  * Split a plan's single best route into daily driving legs under a per-day
  * drive-time cap, ending each day at a charger town (a natural overnight stop).
- * Returns structured days plus a human-readable itinerary string.
+ * When `departDate` is given, also assigns each day a date and clock times,
+ * departing every morning at `dailyDepartTime`. Returns structured days plus a
+ * human-readable itinerary string.
  */
-function summarizeTrip(result: unknown, maxDriveHoursPerDay: number) {
+function summarizeTrip(
+  result: unknown,
+  opts: { maxDriveHoursPerDay: number; departDate?: string; dailyDepartTime: string },
+) {
+  const { maxDriveHoursPerDay, departDate, dailyDepartTime } = opts;
   const route = (result as { routes?: Array<Record<string, unknown>> })?.routes?.[0];
   const legs = (route?.legs as Array<Record<string, unknown>>) ?? [];
   const planId = (result as { planId?: string })?.planId;
   if (!legs.length) return result;
 
   const capSec = maxDriveHoursPerDay * 3600;
+  const [dh, dm] = dailyDepartTime.split(":").map(Number);
+  const departMinutes = (dh ?? 9) * 60 + (dm ?? 0);
   const name = (o: Record<string, unknown>) =>
     typeof o.name === "string" && o.name ? o.name : `${o.lat},${o.long}`;
 
-  type Day = { from: string; to: string; driveHours: number; distanceKm: number; chargeStops: number };
+  type Day = {
+    from: string;
+    to: string;
+    driveHours: number;
+    chargeHours: number;
+    distanceKm: number;
+    chargeStops: number;
+    date?: string;
+    depart?: string;
+    arrive?: string;
+  };
   const days: Day[] = [];
   let dayStart = legs[0]!.origin as Record<string, unknown>;
   let driveSec = 0;
+  let chargeSec = 0;
   let distM = 0;
   let stops = 0;
+
+  const closeDay = (to: Record<string, unknown>) => {
+    const day: Day = {
+      from: name(dayStart),
+      to: name(to),
+      driveHours: Math.round((driveSec / 3600) * 10) / 10,
+      chargeHours: Math.round((chargeSec / 3600) * 10) / 10,
+      distanceKm: Math.round(distM / 1000),
+      chargeStops: stops,
+    };
+    if (departDate) {
+      const depart = tripClock(departDate, days.length, departMinutes);
+      const arrive = new Date(depart.getTime() + (driveSec + chargeSec) * 1000);
+      day.date = fmtDate(depart);
+      day.depart = fmtTime(depart);
+      day.arrive = fmtTime(arrive);
+    }
+    days.push(day);
+    dayStart = to;
+    driveSec = 0;
+    chargeSec = 0;
+    distM = 0;
+    stops = 0;
+  };
 
   for (let i = 0; i < legs.length; i++) {
     const leg = legs[i]!;
     const drive = leg.driveDetails as Record<string, number> | undefined;
     const legDrive = drive?.durationSec ?? 0;
     const origin = leg.origin as Record<string, unknown>;
-    // Close the day before a leg that would push us over the cap.
-    if (driveSec > 0 && driveSec + legDrive > capSec) {
-      days.push({
-        from: name(dayStart),
-        to: name(origin),
-        driveHours: Math.round((driveSec / 3600) * 10) / 10,
-        distanceKm: Math.round(distM / 1000),
-        chargeStops: stops,
-      });
-      dayStart = origin;
-      driveSec = 0;
-      distM = 0;
-      stops = 0;
-    }
+    // Close the day before a leg that would push us over the drive cap.
+    if (driveSec > 0 && driveSec + legDrive > capSec) closeDay(origin);
     driveSec += legDrive;
     distM += drive?.driveDistanceM ?? 0;
-    if (origin.type === "ADDED_CHARGER") stops++;
+    if (origin.type === "ADDED_CHARGER") {
+      stops++;
+      chargeSec += (origin.totalStayDurationSec as number) ?? 0;
+    }
   }
   // Final day ends at the route's last origin (the destination).
-  const last = legs[legs.length - 1]!.origin as Record<string, unknown>;
-  days.push({
-    from: name(dayStart),
-    to: name(last),
-    driveHours: Math.round((driveSec / 3600) * 10) / 10,
-    distanceKm: Math.round(distM / 1000),
-    chargeStops: stops,
-  });
+  closeDay(legs[legs.length - 1]!.origin as Record<string, unknown>);
 
   const totalKm = days.reduce((s, d) => s + d.distanceKm, 0);
   const totalH = Math.round(days.reduce((s, d) => s + d.driveHours, 0) * 10) / 10;
+  const header = departDate
+    ? `${totalKm} km · ${totalH} h driving · ${days.length} day(s), depart ${dailyDepartTime} daily (times local/CET)`
+    : `${totalKm} km · ${totalH} h driving · ${days.length} day(s) (max ${maxDriveHoursPerDay} h/day)`;
   const itinerary = [
-    `${totalKm} km · ${totalH} h driving · ${days.length} day(s) (max ${maxDriveHoursPerDay} h/day)`,
-    ...days.map(
-      (d, i) =>
-        `  Day ${i + 1}: ${d.from} → ${d.to} — ${d.driveHours} h, ${d.distanceKm} km, ${d.chargeStops} charge stop(s)`,
-    ),
+    header,
+    ...days.map((d, i) => {
+      const when = d.date ? `${d.date}, ${d.depart}–${d.arrive}  ` : "";
+      return `  Day ${i + 1}: ${when}${d.from} → ${d.to} — ${d.driveHours} h drive + ${d.chargeHours} h charging, ${d.distanceKm} km, ${d.chargeStops} stop(s)`;
+    }),
   ].join("\n");
 
   return {
@@ -391,6 +437,16 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
           .max(14)
           .optional()
           .describe("Cap on actual driving hours per day before an overnight stop (default 8)."),
+        departDate: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .optional()
+          .describe("Date of the first day's departure, YYYY-MM-DD. If set, each day gets a date and clock times."),
+        dailyDepartTime: z
+          .string()
+          .regex(/^\d{2}:\d{2}$/)
+          .optional()
+          .describe("Local time you set off each morning, HH:MM (default 09:00). Times are treated as local/CET."),
         currentSocFrac: z.number().min(0).max(1).optional().describe("Starting state of charge 0–1 (default 0.9)."),
         charging: chargingSchema.optional(),
         speed: speedSchema.optional(),
@@ -401,6 +457,8 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       destinations: DestinationInput[];
       typecode: string;
       maxDriveHoursPerDay?: number;
+      departDate?: string;
+      dailyDepartTime?: string;
       currentSocFrac?: number;
       charging?: Record<string, unknown>;
       speed?: Record<string, unknown>;
@@ -417,7 +475,11 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         ...(args.avoid ? { avoid: args.avoid } : {}),
       };
       const result = await getClient().plan(request);
-      return summarizeTrip(result, args.maxDriveHoursPerDay ?? 8);
+      return summarizeTrip(result, {
+        maxDriveHoursPerDay: args.maxDriveHoursPerDay ?? 8,
+        departDate: args.departDate,
+        dailyDepartTime: args.dailyDepartTime ?? "09:00",
+      });
     }),
   );
 

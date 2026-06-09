@@ -32,7 +32,7 @@ access token). Point any OAuth-capable MCP client at the `/mcp` URL, or self-hos
 | `abrp_check_access` | Validate the API key against a free endpoint | API key |
 | `abrp_find_vehicle` | Search the model catalogue by name → exact `typecode` | API key |
 | `abrp_plan_route` | Plan an EV route with charging stops (friendly inputs) | API key |
-| `abrp_plan_trip` | Plan a long route split into daily legs (max-hours/day) + overnight stops | API key |
+| `abrp_plan_trip` | Plan a long route split into dated daily legs (max-hours/day, daily start time) + overnight stops | API key |
 | `abrp_plan_raw` | Plan with a full raw `PlanRequest` body | API key |
 | `abrp_list_vehicles` | List vehicles on your ABRP account + typecodes | API key + **session** |
 | `abrp_get_charge_curve` | Charge curve (power vs SoC) for a model at a charger | API key |
