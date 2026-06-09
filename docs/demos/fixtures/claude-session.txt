@@ -1,0 +1,17 @@
+❯ plan a route from Lund to Stockholm in my Rivian R1S — I'm at 82%
+
+⏺ abrp_plan_route  ·  Lund → Stockholm  ·  rivian:r1s:21:135  ·  SoC 82%
+
+⏺ Here's the trip — 607 km, about 7h 10m with two quick stops:
+
+     Lund                        depart · 82%
+       │   245 km  ·  ~2h 10m
+     Nima Energy Skillingaryd    arrive 17%  →  leave 67%
+       │   charge 40 min  ·  62 kW
+       │   142 km  ·  ~1h 25m
+     Circle K Mantorp            arrive 31%  →  leave 70%
+       │   charge 31 min  ·  48 kW
+       │   220 km  ·  ~2h 10m
+     Stockholm                   arrive · 15%
+
+  Two stops, ~71 min charging total. Want me to prefer faster (150kW+) chargers?

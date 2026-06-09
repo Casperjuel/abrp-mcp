@@ -1,0 +1,16 @@
+# Supply-chain hardening: refuse to install any package version until it has
+# been public for at least this many MINUTES. 2880 = 2 days. This is enforced
+# at install time for ALL packages (direct and transitive), so a freshly
+# published malicious version cannot be pulled in before it has had time to be
+# caught and yanked.
+minimumReleaseAge: 2880
+
+# Optional: packages exempt from the age gate (e.g. your own first-party
+# packages you publish and immediately consume). None for now.
+minimumReleaseAgeExclude: []
+
+# pnpm 10 blocks dependency build/postinstall scripts by default (another
+# supply-chain protection). Only the packages listed here may run them.
+# esbuild is the build backend for tsx and needs its install script.
+onlyBuiltDependencies:
+  - esbuild

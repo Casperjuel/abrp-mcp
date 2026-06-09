@@ -1,0 +1,50 @@
+{
+  "name": "abrp-mcp",
+  "version": "0.1.0",
+  "description": "Unofficial Model Context Protocol server for the A Better Route Planner (ABRP) / Iternio EV routing API, built with Hono and deployable on Vercel. Not affiliated with Iternio.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "author": "Casper Juel <info@casperjuel.dk>",
+  "homepage": "https://github.com/Casperjuel/abrp-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Casperjuel/abrp-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Casperjuel/abrp-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "abrp",
+    "iternio",
+    "ev",
+    "route-planning",
+    "hono",
+    "vercel",
+    "oauth"
+  ],
+  "scripts": {
+    "dev": "tsx watch src/dev.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/dev.ts"
+  },
+  "dependencies": {
+    "@hono/mcp": "^0.3.0",
+    "@hono/node-server": "^2.0.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "hono": "^4.12.23",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@10.33.4"
+}

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>abrp-mcp — EV route planning for AI assistants</title>
+  <meta name="description" content="Unofficial MCP server for the A Better Route Planner (ABRP) / Iternio EV routing API." />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0; min-height: 100dvh; display: grid; place-items: center;
+      background: radial-gradient(120% 120% at 50% 0%, #16223b 0%, #0b1220 55%); color: #e7ecf3;
+      padding: 32px;
+    }
+    .card {
+      width: 100%; max-width: 640px; background: #131c2e; border: 1px solid #243049;
+      border-radius: 18px; padding: 40px; box-shadow: 0 30px 80px rgba(0,0,0,.4);
+    }
+    .badge { font-size: 13px; color: #7fb0ff; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+    h1 { font-size: 30px; margin: 8px 0 6px; letter-spacing: -.02em; }
+    p.lede { margin: 0 0 24px; color: #aebbd0; }
+    code { background: #0e1626; border: 1px solid #2c3a57; border-radius: 8px; padding: 3px 8px; font-size: 14px; color: #cfe0ff; }
+    .endpoint { background: #0e1626; border: 1px solid #2c3a57; border-radius: 12px; padding: 14px 16px; margin: 18px 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 24px; }
+    a.btn { text-decoration: none; padding: 11px 18px; border-radius: 10px; font-weight: 600; font-size: 14px; }
+    a.primary { background: #3b82f6; color: #fff; }
+    a.ghost { border: 1px solid #2c3a57; color: #cfe0ff; }
+    ul { padding-left: 20px; color: #c4d0e3; }
+    li { margin: 4px 0; }
+    .foot { margin-top: 26px; font-size: 13px; color: #7e8ca6; }
+    .warn { margin-top: 18px; font-size: 13px; color: #ffd9a8; background: #2a2113; border: 1px solid #6b5424; border-radius: 10px; padding: 10px 14px; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="badge">Model Context Protocol server</div>
+    <h1>abrp-mcp</h1>
+    <p class="lede">Plan EV road trips by talking to an AI assistant — charging stops, state-of-charge and timings, powered by <strong>A Better Route Planner</strong>.</p>
+
+    <div class="endpoint">MCP endpoint &nbsp;→&nbsp; <code>/mcp</code></div>
+
+    <ul>
+      <li>Route planning with charging stops</li>
+      <li>Charger search, vehicle models &amp; charge curves</li>
+      <li>Live telemetry</li>
+    </ul>
+
+    <div class="warn">Unofficial — not affiliated with Iternio. Bring your own ABRP API key; each user authorizes via OAuth.</div>
+
+    <div class="row">
+      <a class="btn primary" href="https://github.com/Casperjuel/abrp-mcp">GitHub repo</a>
+      <a class="btn ghost" href="https://github.com/Casperjuel/abrp-mcp#getting-an-api-key">Get an API key</a>
+    </div>
+
+    <p class="foot">Built with Hono · deployed on Vercel · MIT licensed</p>
+  </main>
+</body>
+</html>

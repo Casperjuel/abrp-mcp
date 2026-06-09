@@ -1,0 +1,14 @@
+node_modules
+.vercel
+.env
+.env.local
+*.log
+dist
+.DS_Store
+
+# Local-only: outreach draft, not for the public repo
+contact-email.txt
+reddit-post.md
+
+# Local TLS certs (mkcert) — never commit
+certs/

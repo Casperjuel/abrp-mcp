@@ -1,0 +1,453 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { AbrpClient, AbrpError } from "./abrp.js";
+
+/** Render any tool result as MCP text content. */
+function ok(data: unknown) {
+  return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+function fail(error: unknown) {
+  const detail =
+    error instanceof AbrpError
+      ? { status: error.status, body: error.body }
+      : { message: error instanceof Error ? error.message : String(error) };
+  return {
+    isError: true as const,
+    content: [{ type: "text" as const, text: `ABRP request failed:\n${JSON.stringify(detail, null, 2)}` }],
+  };
+}
+
+/** Wrap a tool handler so thrown ABRP/network errors become MCP error results. */
+function handler<T>(fn: (args: T) => Promise<unknown>) {
+  return async (args: T) => {
+    try {
+      return ok(await fn(args));
+    } catch (error) {
+      return fail(error);
+    }
+  };
+}
+
+/**
+ * The /plan response embeds huge per-point geometry — encoded polylines, the
+ * per-point SoC/speed/elevation arrays in `geometryPointInfo`, turn-by-turn
+ * `instructions`, `speedLimits` — which can push a single international route
+ * well past an MCP client's payload cap (Claude rejects tool results over 1 MB).
+ * ABRP has no server-side toggle to omit it (ResultOptions only covers
+ * alternatives/currency/unitSystem), and an LLM doesn't use any of it: it needs
+ * the summary and the charging stops. So strip the heavy fields by default and
+ * keep them only when the caller explicitly asks for `detail: "full"`.
+ */
+function slimPlan(result: unknown): unknown {
+  if (!result || typeof result !== "object") return result;
+  const r = result as Record<string, unknown>;
+  if (!Array.isArray(r.routes)) return result;
+  return {
+    ...r,
+    routes: r.routes.map((rt) => {
+      if (!rt || typeof rt !== "object") return rt;
+      const route = rt as Record<string, unknown>;
+      return {
+        ...route,
+        legs: Array.isArray(route.legs) ? route.legs.map(slimLeg) : route.legs,
+      };
+    }),
+  };
+}
+
+function slimLeg(leg: unknown): unknown {
+  if (!leg || typeof leg !== "object") return leg;
+  const out = { ...(leg as Record<string, unknown>) };
+  const origin = out.origin;
+  if (origin && typeof origin === "object") {
+    // Keep the stop facts; drop the bulky per-charger power curve.
+    const { chargeProfile, ...rest } = origin as Record<string, unknown>;
+    void chargeProfile;
+    out.origin = rest;
+  }
+  const drive = out.driveDetails;
+  if (drive && typeof drive === "object") {
+    const d = drive as Record<string, unknown>;
+    // Keep the useful scalars; replace the giant geometry arrays with counts.
+    out.driveDetails = {
+      durationSec: d.durationSec,
+      driveDistanceM: d.driveDistanceM,
+      consumedSoc: d.consumedSoc,
+      consumedW: d.consumedW,
+      instructionCount: Array.isArray(d.instructions) ? d.instructions.length : undefined,
+    };
+  }
+  return out;
+}
+
+// --- Shared input shapes ----------------------------------------------------
+
+const destinationSchema = z
+  .object({
+    lat: z.number().optional().describe("Latitude (use with `long` for a coordinate stop)."),
+    long: z.number().optional().describe("Longitude (use with `lat`)."),
+    address: z.string().optional().describe("Free-text address; geocoded by ABRP. Alternative to lat/long."),
+    chargerId: z.number().int().optional().describe("ABRP charger id to route through. Alternative to lat/long."),
+    name: z.string().optional().describe("Display name, echoed back in the result (e.g. 'Home')."),
+    minArrivalSocFrac: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("Minimum state-of-charge (0–1) required on arrival at this stop."),
+  })
+  .describe("A waypoint: coordinate (lat/long), address, or chargerId.");
+
+type DestinationInput = z.infer<typeof destinationSchema>;
+
+/** Convert a friendly destination into the API's discriminated `Destination`. */
+function toApiDestination(d: DestinationInput) {
+  let location: Record<string, unknown>;
+  if (d.lat !== undefined && d.long !== undefined) {
+    location = { type: "COORDINATES", lat: d.lat, long: d.long };
+  } else if (d.address) {
+    location = { type: "ADDRESS", value: d.address };
+  } else if (d.chargerId !== undefined) {
+    location = { type: "CHARGER_ID", value: d.chargerId };
+  } else {
+    throw new AbrpError("Each destination needs lat+long, address, or chargerId.", 400, {
+      message: "invalid_destination",
+    });
+  }
+  return {
+    location,
+    ...(d.name ? { name: d.name } : {}),
+    ...(d.minArrivalSocFrac !== undefined
+      ? { energySettings: { minArrivalSocFrac: d.minArrivalSocFrac } }
+      : {}),
+  };
+}
+
+const chargingSchema = z
+  .object({
+    connectorTypes: z
+      .array(z.string())
+      .optional()
+      .describe("Allowed connectors, e.g. ['CCS','NACS']. CCS, NACS, TESLA_CCS, CHADEMO, TYPE2, GBT, J1772, …"),
+    minimumDestinationSocFrac: z.number().min(0).max(1).optional().describe("Min SoC at final destination (default 0.1)."),
+    minimumChargerArrivalSocFrac: z.number().min(0).max(1).optional().describe("Min SoC arriving at any charger/waypoint (default 0.1)."),
+    maximumChargingSocFrac: z.number().min(0.2).max(1).optional().describe("Cap the charge level (default 1.0)."),
+    overheadSec: z.number().int().min(0).optional().describe("Per-stop overhead in seconds for find/plug/start (default 300). Higher → fewer, longer stops."),
+    stopPreference: z
+      .enum(["MOST", "MORE", "OPTIMAL", "FEWER", "FEWEST"])
+      .optional()
+      .describe("Bias the number of charge stops (default OPTIMAL = shortest total time)."),
+    realTimeStatus: z.boolean().optional().describe("Plan with live charger availability (premium; must be enabled on the key)."),
+    excludedChargerIds: z.array(z.number().int()).optional().describe("Charger ids to exclude from the plan."),
+    preferredMinimumStallCount: z.number().int().min(1).optional().describe("Soft preference for a minimum stall count per charger."),
+  })
+  .describe("Charging constraints/preferences.");
+
+const speedSchema = z
+  .object({
+    maximumMs: z.number().min(0).optional().describe("Max planning speed in m/s, even if limits allow more (e.g. Autobahn cap)."),
+    allowAdjustment: z.boolean().optional().describe("Let the planner slow individual legs to reach the next charger (default false)."),
+    scaling: z.number().min(0).optional().describe("Speed factor vs limits; 1.1 = 10% faster (default 1)."),
+  })
+  .describe("Speed options.");
+
+const avoidSchema = z
+  .object({
+    ferries: z.boolean().optional(),
+    highways: z.boolean().optional(),
+    tolls: z.boolean().optional(),
+    borders: z.boolean().optional().describe("If true, no country border crossings (chargers/waypoints stay in-country)."),
+  })
+  .describe("Route avoidance options.");
+
+/**
+ * Register every ABRP tool on the MCP server.
+ *
+ * `getClient` is called per invocation so credentials can come from the request
+ * context (OAuth token / headers) or an env fallback.
+ */
+export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient) {
+  // --- Diagnostics ---------------------------------------------------------
+  server.registerTool(
+    "abrp_check_access",
+    {
+      title: "Check API access",
+      description:
+        "Verify the configured ABRP Planning API key works by calling a free reference-consumption endpoint. Returns the result on success.",
+      inputSchema: {
+        typecode: z
+          .string()
+          .optional()
+          .describe("Vehicle typecode to probe (default a public model). Format make:model:year:battery."),
+      },
+    },
+    handler(async ({ typecode }: { typecode?: string }) => getClient().checkAccess(typecode)),
+  );
+
+  // --- Route planning (the headline feature, billed) -----------------------
+  server.registerTool(
+    "abrp_plan_route",
+    {
+      title: "Plan an EV route",
+      description:
+        "Plan an EV route with charging stops. Returns up to 3 alternative routes, each with a summary and charging stops (arrival/departure SoC, charge duration, power). By default the bulky map geometry (polylines, per-point arrays, turn-by-turn) is stripped so the result fits within MCP size limits — pass detail:'full' if you truly need it. NOTE: each successful plan is billed by Iternio. Supply at least an origin and destination plus the vehicle typecode.",
+      inputSchema: {
+        destinations: z
+          .array(destinationSchema)
+          .min(2)
+          .describe("Ordered stops; first = origin, last = final destination. At least 2."),
+        typecode: z
+          .string()
+          .describe("Vehicle model typecode, e.g. 'rivian:r1s:21:135' (make:model:year:battery). Use abrp_list_vehicles to find one."),
+        currentSocFrac: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe("Current state of charge as a fraction 0–1 (default 0.9)."),
+        referenceConsumption: z.number().min(0).max(1000).optional().describe("Override reference consumption in Wh/km."),
+        degradationFrac: z.number().min(0).max(1).optional().describe("Battery degradation fraction 0–1."),
+        configuration: z.string().optional().describe("Consumption modifier, e.g. 'trailer'."),
+        charging: chargingSchema.optional(),
+        speed: speedSchema.optional(),
+        avoid: avoidSchema.optional(),
+        extra: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Advanced: extra top-level PlanRequest fields merged verbatim (resultOptions, traffic, weather, clientContext…)."),
+        detail: z
+          .enum(["summary", "full"])
+          .optional()
+          .describe(
+            "Response detail. 'summary' (default) returns the route summary and charging stops with the bulky map geometry stripped — use this. 'full' returns the complete response including polylines and per-point arrays, which can exceed an MCP client's size limit on long routes.",
+          ),
+      },
+    },
+    handler(async (args: {
+      destinations: DestinationInput[];
+      typecode: string;
+      currentSocFrac?: number;
+      referenceConsumption?: number;
+      degradationFrac?: number;
+      configuration?: string;
+      charging?: Record<string, unknown>;
+      speed?: Record<string, unknown>;
+      avoid?: Record<string, unknown>;
+      extra?: Record<string, unknown>;
+      detail?: "summary" | "full";
+    }) => {
+      const request: Record<string, unknown> = {
+        destinations: args.destinations.map(toApiDestination),
+        vehicle: {
+          identifier: { type: "TYPECODE", value: args.typecode },
+          ...(args.currentSocFrac !== undefined ? { currentSocFrac: args.currentSocFrac } : {}),
+          ...(args.referenceConsumption !== undefined ? { referenceConsumption: args.referenceConsumption } : {}),
+          ...(args.degradationFrac !== undefined ? { degradationFrac: args.degradationFrac } : {}),
+          ...(args.configuration ? { configuration: args.configuration } : {}),
+        },
+        ...(args.charging ? { charging: args.charging } : {}),
+        ...(args.speed ? { speed: args.speed } : {}),
+        ...(args.avoid ? { avoid: args.avoid } : {}),
+        ...(args.extra ?? {}),
+      };
+      const result = await getClient().plan(request);
+      return args.detail === "full" ? result : slimPlan(result);
+    }),
+  );
+
+  server.registerTool(
+    "abrp_plan_raw",
+    {
+      title: "Plan an EV route (raw request)",
+      description:
+        "Escape hatch for full control: POST a complete PlanRequest body to /plan exactly as documented in the Iternio v2 OpenAPI spec. Billed per successful plan. Returns the summarised result (map geometry stripped) by default; pass detail:'full' for the complete response.",
+      inputSchema: {
+        request: z.record(z.string(), z.unknown()).describe("A full PlanRequest / PlanRequestWithTelemetry JSON object."),
+        detail: z
+          .enum(["summary", "full"])
+          .optional()
+          .describe("'summary' (default) strips bulky map geometry; 'full' returns everything (may exceed client size limits)."),
+      },
+    },
+    handler(async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
+      const result = await getClient().plan(request);
+      return detail === "full" ? result : slimPlan(result);
+    }),
+  );
+
+  // --- Vehicles & models ---------------------------------------------------
+  server.registerTool(
+    "abrp_list_vehicles",
+    {
+      title: "List my vehicles",
+      description:
+        "List the vehicles on the authenticated ABRP account and their typecodes. Requires a user session (X-ABRP-SESSION).",
+      inputSchema: {
+        countryCode3: z.string().length(3).optional().describe("Optional ISO 3166-1 alpha-3 country code to localize results, e.g. 'SWE'."),
+      },
+    },
+    handler(async ({ countryCode3 }: { countryCode3?: string }) => getClient().listVehicles({ countryCode3 })),
+  );
+
+  server.registerTool(
+    "abrp_get_charge_curve",
+    {
+      title: "Get charge curve",
+      description:
+        "Get a vehicle model's charge curve (power vs SoC) at a specific charger and starting SoC.",
+      inputSchema: {
+        typecode: z.string().describe("Vehicle model typecode, e.g. 'rivian:r1s:21:135'."),
+        chargerId: z.number().int().optional().describe("ABRP charger id to evaluate the curve against."),
+        startSoc: z.number().optional().describe("Starting state of charge in percent (0–100), e.g. 10."),
+        calibrationState: z.string().optional().describe("Calibration state from a prior plan/refresh; may affect charge speed."),
+      },
+    },
+    handler(async (args: { typecode: string; chargerId?: number; startSoc?: number; calibrationState?: string }) =>
+      getClient().chargeCurve(args.typecode, {
+        chargerId: args.chargerId,
+        startSoc: args.startSoc,
+        calibrationState: args.calibrationState,
+      }),
+    ),
+  );
+
+  server.registerTool(
+    "abrp_get_reference_consumption",
+    {
+      title: "Get reference consumption",
+      description:
+        "Get a vehicle model's reference energy consumption (Wh/km @ ~110 km/h) by typecode. Optional config modifiers.",
+      inputSchema: {
+        typecode: z.string().describe("Vehicle model typecode, e.g. 'rivian:r1s:21:135'."),
+        extraMassKg: z.number().optional().describe("Additional mass in kg (load/trailer)."),
+        manualRefCons: z.number().optional().describe("Manual reference consumption override (Wh/km)."),
+        vehicleConfigType: z.string().optional().describe("Vehicle configuration type (advanced)."),
+        vehicleConfigKey: z.string().optional().describe("Vehicle configuration key (advanced)."),
+      },
+    },
+    handler(async (args: {
+      typecode: string;
+      extraMassKg?: number;
+      manualRefCons?: number;
+      vehicleConfigType?: string;
+      vehicleConfigKey?: string;
+    }) =>
+      getClient().refConsByTypecode(args.typecode, {
+        extraMassKg: args.extraMassKg,
+        manualRefCons: args.manualRefCons,
+        vehicleConfigType: args.vehicleConfigType,
+        vehicleConfigKey: args.vehicleConfigKey,
+      }),
+    ),
+  );
+
+  // --- Range ---------------------------------------------------------------
+  server.registerTool(
+    "abrp_estimate_range",
+    {
+      title: "Estimate range",
+      description:
+        "Create a range plot: the set of points reachable from a location for a given vehicle and conditions (alpha). Provide a full RangeRequest body.",
+      inputSchema: {
+        request: z.record(z.string(), z.unknown()).describe("A RangeRequest JSON object (location + vehicle + conditions)."),
+      },
+    },
+    handler(async ({ request }: { request: Record<string, unknown> }) => getClient().range(request)),
+  );
+
+  // --- Chargers ------------------------------------------------------------
+  server.registerTool(
+    "abrp_get_chargers",
+    {
+      title: "Get chargers by id",
+      description: "Fetch one or more chargers by their ABRP ids (order preserved).",
+      inputSchema: {
+        chargerIds: z.array(z.number().int()).min(1).max(1000).describe("Charger ids to fetch."),
+      },
+    },
+    handler(async ({ chargerIds }: { chargerIds: number[] }) => getClient().getChargers(chargerIds)),
+  );
+
+  server.registerTool(
+    "abrp_get_charger",
+    {
+      title: "Get charger by id",
+      description: "Fetch a single charger by its ABRP id.",
+      inputSchema: { chargerId: z.number().int().describe("The ABRP charger id.") },
+    },
+    handler(async ({ chargerId }: { chargerId: number }) => getClient().getCharger(chargerId)),
+  );
+
+  server.registerTool(
+    "abrp_search_chargers",
+    {
+      title: "Search chargers near a point",
+      description:
+        "Find chargers around a coordinate, sorted by power, distance, or a weighted combination.",
+      inputSchema: {
+        lat: z.number().describe("Latitude of the search center."),
+        long: z.number().describe("Longitude of the search center."),
+        maxDistance: z.number().int().min(1).max(500000).optional().describe("Max distance in meters (default 50000)."),
+        sortBy: z
+          .enum(["POWER", "DISTANCE", "POWER_AND_DISTANCE"])
+          .optional()
+          .describe("Sort/selection method (default POWER_AND_DISTANCE)."),
+        extra: z.record(z.string(), z.unknown()).optional().describe("Additional GeoSearchParams (filters) merged verbatim."),
+      },
+    },
+    handler(async (args: {
+      lat: number;
+      long: number;
+      maxDistance?: number;
+      sortBy?: "POWER" | "DISTANCE" | "POWER_AND_DISTANCE";
+      extra?: Record<string, unknown>;
+    }) =>
+      getClient().searchChargersGeopoint({
+        location: { lat: args.lat, long: args.long },
+        maxDistance: args.maxDistance ?? 50000,
+        sortBy: args.sortBy ?? "POWER_AND_DISTANCE",
+        ...(args.extra ?? {}),
+      }),
+    ),
+  );
+
+  // --- Telemetry (v1, free) ------------------------------------------------
+  server.registerTool(
+    "abrp_send_telemetry",
+    {
+      title: "Send live telemetry",
+      description:
+        "Push a live vehicle telemetry datapoint to ABRP via the free v1 /tlm/send endpoint. Requires your ABRP user token. Units follow the v1 spec: soc in %, speed in km/h, power in kW, temps in °C.",
+      inputSchema: {
+        utc: z.number().int().describe("UNIX timestamp in seconds for this datapoint."),
+        soc: z.number().min(0).max(100).describe("State of charge in percent (0–100)."),
+        lat: z.number().describe("Latitude."),
+        lon: z.number().describe("Longitude."),
+        car_model: z.string().optional().describe("Vehicle typecode, e.g. 'rivian:r1s:21:135'."),
+        speed: z.number().optional().describe("Speed in km/h."),
+        is_charging: z.union([z.literal(0), z.literal(1)]).optional().describe("1 if charging, else 0."),
+        is_dcfc: z.union([z.literal(0), z.literal(1)]).optional().describe("1 if DC fast charging."),
+        power: z.number().optional().describe("Battery power in kW (negative = charging)."),
+        voltage: z.number().optional().describe("Battery voltage in V."),
+        current: z.number().optional().describe("Battery current in A."),
+        soh: z.number().optional().describe("State of health in percent."),
+        heading: z.number().optional().describe("Heading in degrees."),
+        elevation: z.number().optional().describe("Elevation in meters."),
+        ext_temp: z.number().optional().describe("External temperature in °C."),
+        batt_temp: z.number().optional().describe("Battery temperature in °C."),
+        odometer: z.number().optional().describe("Odometer in km."),
+        capacity: z.number().optional().describe("Usable battery capacity in kWh."),
+        kwh_charged: z.number().optional().describe("Energy added this session in kWh."),
+        extra: z.record(z.string(), z.unknown()).optional().describe("Any additional tlm fields merged verbatim."),
+      },
+    },
+    handler(async (args: Record<string, unknown>) => {
+      const { extra, ...tlm } = args as { extra?: Record<string, unknown> } & Record<string, unknown>;
+      const payload = Object.fromEntries(
+        Object.entries({ ...tlm, ...(extra ?? {}) }).filter(([, v]) => v !== undefined),
+      );
+      return getClient().sendTelemetry(payload);
+    }),
+  );
+}
