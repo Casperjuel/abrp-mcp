@@ -25,6 +25,22 @@ ABRP key via the built-in OAuth flow (nothing is stored server-side; your key is
 access token). Point any OAuth-capable MCP client at the `/mcp` URL, or self-host your own (see
 [Deploy to Vercel](#deploy-to-vercel)).
 
+## Quick start — no terminal, no install
+
+You don't need to be a developer or run anything. Using the hosted instance and Claude Desktop:
+
+1. **Get an ABRP API key** — see [Getting an API key](#getting-an-api-key) below.
+2. Open **Claude Desktop → Settings → Connectors → Add custom connector**.
+3. Name it `ABRP` and paste the URL **`https://abrp-mcp.vercel.app/mcp`**, then add it.
+4. A login page opens — **paste your API key** and click Authorize. (Nothing is stored on the
+   server; your key is sealed into your own access token.)
+5. Start a new chat and just ask, e.g. *"Plan a route from Copenhagen to Berlin in a VW ID.4,
+   I'm at 80%."*
+
+That's it — no JSON files, no terminal. (Other MCP-capable assistants that support custom remote
+connectors work the same way; point them at the same URL.) The honest catch is step 1 — getting a
+key still takes a moment; see below.
+
 ## Tools
 
 | Tool | What it does | Auth |
