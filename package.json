@@ -1,6 +1,6 @@
 {
   "name": "abrp-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unofficial Model Context Protocol server for the A Better Route Planner (ABRP) / Iternio EV routing API, built with Hono and deployable on Vercel. Not affiliated with Iternio.",
   "type": "module",
   "private": true,
