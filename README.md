@@ -87,24 +87,25 @@ cost and then per-plan billing on the `/plan` endpoint; **every other endpoint i
 the only path that's officially sanctioned, gives you your own quota, and won't disappear out from
 under you. If you're going to use this for anything beyond a quick experiment, do this.
 
-### 2. The quick, unofficial way — at your own risk
+### 2. The quick way — borrow ABRP's public web key
 
-> ⚠️ **Unofficial. Use at your own risk.** The ABRP web app ships a **shared** API key in its
-> front-end (the same key for every visitor). You can read it from your browser's network tab. It
-> works — but it is **not yours**: plans you make are billed to Iternio's own account, the key can
-> be rate-limited or rotated at any moment without notice, and relying on it for anything public or
-> long-lived is not OK. Treat it as a way to *try the project in five minutes*, not to run a service.
-> If you find it useful, get your own key (option 1) and support them.
+The ABRP web app ships a **single public API key** in its front-end — the same key for every
+visitor (you get the identical value even logged-out in incognito). It's not a secret and it's not
+tied to your account, so reading it leaks nothing. It's the fastest way to try the project.
 
-1. Log in at <https://abetterrouteplanner.com> with a (free) account.
-2. Open DevTools → **Network**, plan any route, and look at the request to `api.iternio.com`.
-3. Copy the **`x-api-key`** request header. (That's the only thing the public `/plan` endpoint
-   needs — a typecode plan works without your session.)
-4. Use it as `ABRP_API_KEY` / the `X-API-KEY` header. **Never commit it** to a repo.
+1. Open <https://abetterrouteplanner.com> (no login needed).
+2. Open DevTools → **Network**, plan any route, and find the request to `api.iternio.com`.
+3. Copy the **`x-api-key`** request header — that's the whole key. (A typecode plan needs nothing
+   else; the `x-abrp-session` JWT in the same request is your short-lived account session, only
+   needed to list the cars saved on your account.)
+4. Use it as `ABRP_API_KEY` / the `X-API-KEY` header.
 
-> The optional `x-abrp-session` JWT in that same request is *your* short-lived account session
-> (~15 min). It's only needed for user-scoped calls (listing the cars saved on your account); plain
-> typecode planning doesn't need it.
+> ⚠️ **It's public, but it's not free — it bills Iternio.** Every plan made with this key is charged
+> to *Iternio's own account*, not yours. That's fine for a quick personal try, but please don't
+> build anything that routes real volume through it: at scale it just gets the key rate-limited or
+> rotated, and it's not fair to Iternio. **If you use this for real, get your own key (option 1).**
+> Don't bake this key into a public deployment — the hosted instance deliberately holds no key and
+> asks each user for their own.
 
 ## Credentials
 
