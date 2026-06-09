@@ -2,5 +2,9 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "pnpm build",
   "outputDirectory": "public",
+  "regions": ["arn1"],
+  "functions": {
+    "api/index.ts": { "maxDuration": 60, "memory": 1024 }
+  },
   "rewrites": [{ "source": "/(.*)", "destination": "/api" }]
 }

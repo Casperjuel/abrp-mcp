@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { AbrpClient, AbrpError } from "./abrp.js";
+import { type AbrpClient, AbrpError } from "./abrp.js";
 
 /** Render any tool result as MCP text content. */
 function ok(data: unknown) {
@@ -39,7 +39,7 @@ function handler<T>(fn: (args: T) => Promise<unknown>) {
  * the summary and the charging stops. So strip the heavy fields by default and
  * keep them only when the caller explicitly asks for `detail: "full"`.
  */
-function slimPlan(result: unknown): unknown {
+export function slimPlan(result: unknown): unknown {
   if (!result || typeof result !== "object") return result;
   const r = result as Record<string, unknown>;
   if (!Array.isArray(r.routes)) return result;
@@ -48,12 +48,36 @@ function slimPlan(result: unknown): unknown {
     routes: r.routes.map((rt) => {
       if (!rt || typeof rt !== "object") return rt;
       const route = rt as Record<string, unknown>;
+      const cost = routeCost(route);
       return {
         ...route,
+        ...(cost ? { estimatedChargingCost: cost } : {}),
         legs: Array.isArray(route.legs) ? route.legs.map(slimLeg) : route.legs,
       };
     }),
   };
+}
+
+/** Sum the per-stop charging costs ABRP returns into a single trip total. */
+export function routeCost(route: Record<string, unknown>): { amount: number; currency: string } | undefined {
+  const legs = route.legs;
+  if (!Array.isArray(legs)) return undefined;
+  let total = 0;
+  let currency: string | undefined;
+  let any = false;
+  for (const leg of legs) {
+    const costs = (leg as { origin?: { charger?: { costs?: unknown } } })?.origin?.charger?.costs;
+    if (!Array.isArray(costs) || costs.length === 0) continue;
+    const entry =
+      (costs.find((c) => (c as { isDefault?: boolean })?.isDefault) as Record<string, unknown>) ??
+      (costs[0] as Record<string, unknown>);
+    if (entry && typeof entry.cost === "number") {
+      total += entry.cost;
+      if (typeof entry.currency === "string") currency = entry.currency;
+      any = true;
+    }
+  }
+  return any ? { amount: Math.round(total * 100) / 100, currency: currency ?? "" } : undefined;
 }
 
 function slimLeg(leg: unknown): unknown {
@@ -99,7 +123,9 @@ async function getCarModels(client: AbrpClient) {
   const SIX_HOURS = 6 * 60 * 60 * 1000;
   if (carModelsCache && Date.now() - carModelsCache.at < SIX_HOURS) return carModelsCache.models;
   const models = await client.listCarModels();
-  carModelsCache = { at: Date.now(), models };
+  // Don't cache an empty/failed result — a transient blip would otherwise make
+  // find_vehicle return "0 models" for six hours.
+  if (models.length > 0) carModelsCache = { at: Date.now(), models };
   return models;
 }
 
@@ -114,8 +140,7 @@ function tripClock(departDate: string, dayIndex: number, departMinutes: number) 
   return base;
 }
 
-const fmtDate = (d: Date) =>
-  `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+const fmtDate = (d: Date) => `${WEEKDAYS[d.getUTCDay()]} ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
 const fmtTime = (d: Date) =>
   `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
 
@@ -126,7 +151,7 @@ const fmtTime = (d: Date) =>
  * departing every morning at `dailyDepartTime`. Returns structured days plus a
  * human-readable itinerary string.
  */
-function summarizeTrip(
+export function summarizeTrip(
   result: unknown,
   opts: { maxDriveHoursPerDay: number; departDate?: string; dailyDepartTime: string },
 ) {
@@ -203,9 +228,11 @@ function summarizeTrip(
 
   const totalKm = days.reduce((s, d) => s + d.distanceKm, 0);
   const totalH = Math.round(days.reduce((s, d) => s + d.driveHours, 0) * 10) / 10;
+  const cost = routeCost(route as Record<string, unknown>);
+  const costStr = cost ? ` · ~${cost.amount} ${cost.currency} charging` : "";
   const header = departDate
-    ? `${totalKm} km · ${totalH} h driving · ${days.length} day(s), depart ${dailyDepartTime} daily (times local/CET)`
-    : `${totalKm} km · ${totalH} h driving · ${days.length} day(s) (max ${maxDriveHoursPerDay} h/day)`;
+    ? `${totalKm} km · ${totalH} h driving · ${days.length} day(s), depart ${dailyDepartTime} daily (times local/CET)${costStr}`
+    : `${totalKm} km · ${totalH} h driving · ${days.length} day(s) (max ${maxDriveHoursPerDay} h/day)${costStr}`;
   const itinerary = [
     header,
     ...days.map((d, i) => {
@@ -216,7 +243,13 @@ function summarizeTrip(
 
   return {
     days,
-    summary: { totalKm, totalDriveHours: totalH, dayCount: days.length, maxDriveHoursPerDay },
+    summary: {
+      totalKm,
+      totalDriveHours: totalH,
+      dayCount: days.length,
+      maxDriveHoursPerDay,
+      ...(cost ? { estimatedChargingCost: cost } : {}),
+    },
     itinerary,
     ...(planId ? { viewUrl: `https://abetterrouteplanner.com/?plan_uuid=${planId}`, planId } : {}),
   };
@@ -229,7 +262,11 @@ const destinationSchema = z
     lat: z.number().optional().describe("Latitude (use with `long` for a coordinate stop)."),
     long: z.number().optional().describe("Longitude (use with `lat`)."),
     address: z.string().optional().describe("Free-text address; geocoded by ABRP. Alternative to lat/long."),
-    chargerId: z.number().int().optional().describe("ABRP charger id to route through. Alternative to lat/long."),
+    chargerId: z
+      .number()
+      .int()
+      .optional()
+      .describe("ABRP charger id to route through. Alternative to lat/long."),
     name: z.string().optional().describe("Display name, echoed back in the result (e.g. 'Home')."),
     minArrivalSocFrac: z
       .number()
@@ -243,7 +280,7 @@ const destinationSchema = z
 type DestinationInput = z.infer<typeof destinationSchema>;
 
 /** Convert a friendly destination into the API's discriminated `Destination`. */
-function toApiDestination(d: DestinationInput) {
+export function toApiDestination(d: DestinationInput) {
   let location: Record<string, unknown>;
   if (d.lat !== undefined && d.long !== undefined) {
     location = { type: "COORDINATES", lat: d.lat, long: d.long };
@@ -270,20 +307,63 @@ const chargingSchema = z
     connectorTypes: z
       .array(z.string())
       .optional()
-      .describe("Allowed connectors, e.g. ['CCS','NACS']. CCS, NACS, TESLA_CCS, CHADEMO, TYPE2, GBT, J1772, …"),
-    minimumDestinationSocFrac: z.number().min(0).max(1).optional().describe("Min SoC at final destination (default 0.1)."),
-    minimumChargerArrivalSocFrac: z.number().min(0).max(1).optional().describe("Min SoC arriving at any charger/waypoint (default 0.1)."),
-    maximumChargingSocFrac: z.number().min(0.2).max(1).optional().describe("Cap the charge level (default 1.0)."),
-    overheadSec: z.number().int().min(0).optional().describe("Per-stop overhead in seconds for find/plug/start (default 300). Higher → fewer, longer stops."),
+      .describe(
+        "Allowed connectors, e.g. ['CCS','NACS']. CCS, NACS, TESLA_CCS, CHADEMO, TYPE2, GBT, J1772, …",
+      ),
+    minimumDestinationSocFrac: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("Min SoC at final destination (default 0.1)."),
+    minimumChargerArrivalSocFrac: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("Min SoC arriving at any charger/waypoint (default 0.1)."),
+    maximumChargingSocFrac: z
+      .number()
+      .min(0.2)
+      .max(1)
+      .optional()
+      .describe("Cap the charge level (default 1.0)."),
+    overheadSec: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe(
+        "Per-stop overhead in seconds for find/plug/start (default 300). Higher → fewer, longer stops.",
+      ),
     stopPreference: z
       .enum(["MOST", "MORE", "OPTIMAL", "FEWER", "FEWEST"])
       .optional()
       .describe("Bias the number of charge stops (default OPTIMAL = shortest total time)."),
-    realTimeStatus: z.boolean().optional().describe("Plan with live charger availability (premium; must be enabled on the key)."),
-    excludedChargerIds: z.array(z.number().int()).optional().describe("Charger ids to exclude from the plan."),
-    preferredMinimumStallCount: z.number().int().min(1).optional().describe("Soft preference for a minimum stall count per charger."),
+    realTimeStatus: z
+      .boolean()
+      .optional()
+      .describe("Plan with live charger availability (premium; must be enabled on the key)."),
+    excludedChargerIds: z
+      .array(z.number().int())
+      .optional()
+      .describe("Charger ids to exclude from the plan."),
+    preferredMinimumStallCount: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("Soft preference for a minimum stall count per charger."),
     preferredFeatures: z
-      .array(z.enum(["TRAILER_FRIENDLY", "DOG_FRIENDLY", "HAS_PLAYGROUND", "HAS_OPEN_RESTROOMS", "PLUG_AND_CHARGE"]))
+      .array(
+        z.enum([
+          "TRAILER_FRIENDLY",
+          "DOG_FRIENDLY",
+          "HAS_PLAYGROUND",
+          "HAS_OPEN_RESTROOMS",
+          "PLUG_AND_CHARGE",
+        ]),
+      )
       .optional()
       .describe(
         "Bias toward chargers with these amenities (soft preference, not a hard filter). TRAILER_FRIENDLY = caravan/trailer-accessible (pull-through), HAS_PLAYGROUND, HAS_OPEN_RESTROOMS, DOG_FRIENDLY, PLUG_AND_CHARGE.",
@@ -291,7 +371,9 @@ const chargingSchema = z
     preferredTags: z
       .array(z.string())
       .optional()
-      .describe("Bias toward chargers carrying these free-text tags (e.g. for food/restaurant nearby), soft preference."),
+      .describe(
+        "Bias toward chargers carrying these free-text tags (e.g. for food/restaurant nearby), soft preference.",
+      ),
     networks: z
       .array(
         z.object({
@@ -302,12 +384,14 @@ const chargingSchema = z
         }),
       )
       .optional()
-      .describe("Per-network preferences, e.g. only Ionity/Tesla, or avoid a network. Resolve ids via abrp_search_networks."),
+      .describe(
+        "Per-network preferences, e.g. only Ionity/Tesla, or avoid a network. Resolve ids via abrp_search_networks.",
+      ),
   })
   .describe("Charging constraints/preferences.");
 
 /** Map the friendly charging schema onto the API's ChargingOptions shape. */
-function toApiCharging(charging?: Record<string, unknown>): Record<string, unknown> | undefined {
+export function toApiCharging(charging?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!charging) return undefined;
   const { preferredFeatures, preferredTags, networks, ...rest } = charging as {
     preferredFeatures?: string[];
@@ -330,7 +414,9 @@ const weatherSchema = z
   .object({
     type: z
       .enum(["SEASONAL", "REAL_TIME", "MANUAL"])
-      .describe("SEASONAL = seasonal average (default); REAL_TIME = live conditions; MANUAL = set values below."),
+      .describe(
+        "SEASONAL = seasonal average (default); REAL_TIME = live conditions; MANUAL = set values below.",
+      ),
     temperatureC: z.number().optional().describe("MANUAL: outside temperature in °C (affects consumption)."),
     roadConditions: z.enum(["NORMAL", "RAIN", "HEAVY_RAIN"]).optional().describe("MANUAL: road conditions."),
     windSpeedMs: z.number().min(0).optional().describe("MANUAL: wind speed in m/s."),
@@ -353,8 +439,15 @@ function toResultOptions(opts: {
 
 const speedSchema = z
   .object({
-    maximumMs: z.number().min(0).optional().describe("Max planning speed in m/s, even if limits allow more (e.g. Autobahn cap)."),
-    allowAdjustment: z.boolean().optional().describe("Let the planner slow individual legs to reach the next charger (default false)."),
+    maximumMs: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Max planning speed in m/s, even if limits allow more (e.g. Autobahn cap)."),
+    allowAdjustment: z
+      .boolean()
+      .optional()
+      .describe("Let the planner slow individual legs to reach the next charger (default false)."),
     scaling: z.number().min(0).optional().describe("Speed factor vs limits; 1.1 = 10% faster (default 1)."),
   })
   .describe("Speed options.");
@@ -364,7 +457,10 @@ const avoidSchema = z
     ferries: z.boolean().optional(),
     highways: z.boolean().optional(),
     tolls: z.boolean().optional(),
-    borders: z.boolean().optional().describe("If true, no country border crossings (chargers/waypoints stay in-country)."),
+    borders: z
+      .boolean()
+      .optional()
+      .describe("If true, no country border crossings (chargers/waypoints stay in-country)."),
   })
   .describe("Route avoidance options.");
 
@@ -406,24 +502,41 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
           .describe("Ordered stops; first = origin, last = final destination. At least 2."),
         typecode: z
           .string()
-          .describe("Vehicle model typecode, e.g. 'rivian:r1s:21:135' (make:model:year:battery). Use abrp_list_vehicles to find one."),
+          .describe(
+            "Vehicle model typecode, e.g. 'rivian:r1s:21:135' (make:model:year:battery). Use abrp_list_vehicles to find one.",
+          ),
         currentSocFrac: z
           .number()
           .min(0)
           .max(1)
           .optional()
           .describe("Current state of charge as a fraction 0–1 (default 0.9)."),
-        referenceConsumption: z.number().min(0).max(1000).optional().describe("Override reference consumption in Wh/km."),
+        referenceConsumption: z
+          .number()
+          .min(0)
+          .max(1000)
+          .optional()
+          .describe("Override reference consumption in Wh/km."),
         degradationFrac: z.number().min(0).max(1).optional().describe("Battery degradation fraction 0–1."),
         configuration: z.string().optional().describe("Consumption modifier, e.g. 'trailer'."),
         charging: chargingSchema.optional(),
         speed: speedSchema.optional(),
         avoid: avoidSchema.optional(),
         weather: weatherSchema.optional(),
-        traffic: z.enum(["NO_TRAFFIC", "REAL_TIME"]).optional().describe("REAL_TIME uses live traffic (premium on the key)."),
-        currency: z.string().length(3).optional().describe("3-letter currency for charging costs, e.g. 'DKK', 'EUR'."),
+        traffic: z
+          .enum(["NO_TRAFFIC", "REAL_TIME"])
+          .optional()
+          .describe("REAL_TIME uses live traffic (premium on the key)."),
+        currency: z
+          .string()
+          .length(3)
+          .optional()
+          .describe("3-letter currency for charging costs, e.g. 'DKK', 'EUR'."),
         units: z.enum(["METRIC", "IMPERIAL"]).optional().describe("Units in the response (default METRIC)."),
-        alternatives: z.boolean().optional().describe("Return up to ~3 alternative routes instead of just the best one."),
+        alternatives: z
+          .boolean()
+          .optional()
+          .describe("Return up to ~3 alternative routes instead of just the best one."),
         extra: z
           .record(z.string(), z.unknown())
           .optional()
@@ -436,45 +549,49 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
           ),
       },
     },
-    handler(async (args: {
-      destinations: DestinationInput[];
-      typecode: string;
-      currentSocFrac?: number;
-      referenceConsumption?: number;
-      degradationFrac?: number;
-      configuration?: string;
-      charging?: Record<string, unknown>;
-      speed?: Record<string, unknown>;
-      avoid?: Record<string, unknown>;
-      weather?: Record<string, unknown>;
-      traffic?: string;
-      currency?: string;
-      units?: "METRIC" | "IMPERIAL";
-      alternatives?: boolean;
-      extra?: Record<string, unknown>;
-      detail?: "summary" | "full";
-    }) => {
-      const resultOptions = toResultOptions(args);
-      const request: Record<string, unknown> = {
-        destinations: args.destinations.map(toApiDestination),
-        vehicle: {
-          identifier: { type: "TYPECODE", value: args.typecode },
-          ...(args.currentSocFrac !== undefined ? { currentSocFrac: args.currentSocFrac } : {}),
-          ...(args.referenceConsumption !== undefined ? { referenceConsumption: args.referenceConsumption } : {}),
-          ...(args.degradationFrac !== undefined ? { degradationFrac: args.degradationFrac } : {}),
-          ...(args.configuration ? { configuration: args.configuration } : {}),
-        },
-        ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
-        ...(args.speed ? { speed: args.speed } : {}),
-        ...(args.avoid ? { avoid: args.avoid } : {}),
-        ...(args.weather ? { weather: args.weather } : {}),
-        ...(args.traffic ? { traffic: args.traffic } : {}),
-        ...(resultOptions ? { resultOptions } : {}),
-        ...(args.extra ?? {}),
-      };
-      const result = await getClient().plan(request);
-      return withViewUrl(args.detail === "full" ? result : slimPlan(result));
-    }),
+    handler(
+      async (args: {
+        destinations: DestinationInput[];
+        typecode: string;
+        currentSocFrac?: number;
+        referenceConsumption?: number;
+        degradationFrac?: number;
+        configuration?: string;
+        charging?: Record<string, unknown>;
+        speed?: Record<string, unknown>;
+        avoid?: Record<string, unknown>;
+        weather?: Record<string, unknown>;
+        traffic?: string;
+        currency?: string;
+        units?: "METRIC" | "IMPERIAL";
+        alternatives?: boolean;
+        extra?: Record<string, unknown>;
+        detail?: "summary" | "full";
+      }) => {
+        const resultOptions = toResultOptions(args);
+        const request: Record<string, unknown> = {
+          destinations: args.destinations.map(toApiDestination),
+          vehicle: {
+            identifier: { type: "TYPECODE", value: args.typecode },
+            ...(args.currentSocFrac !== undefined ? { currentSocFrac: args.currentSocFrac } : {}),
+            ...(args.referenceConsumption !== undefined
+              ? { referenceConsumption: args.referenceConsumption }
+              : {}),
+            ...(args.degradationFrac !== undefined ? { degradationFrac: args.degradationFrac } : {}),
+            ...(args.configuration ? { configuration: args.configuration } : {}),
+          },
+          ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
+          ...(args.speed ? { speed: args.speed } : {}),
+          ...(args.avoid ? { avoid: args.avoid } : {}),
+          ...(args.weather ? { weather: args.weather } : {}),
+          ...(args.traffic ? { traffic: args.traffic } : {}),
+          ...(resultOptions ? { resultOptions } : {}),
+          ...(args.extra ?? {}),
+        };
+        const result = await getClient().plan(request);
+        return withViewUrl(args.detail === "full" ? result : slimPlan(result));
+      },
+    ),
   );
 
   server.registerTool(
@@ -484,17 +601,23 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       description:
         "Escape hatch for full control: POST a complete PlanRequest body to /plan exactly as documented in the Iternio v2 OpenAPI spec. Billed per successful plan. Returns the summarised result (map geometry stripped) by default; pass detail:'full' for the complete response.",
       inputSchema: {
-        request: z.record(z.string(), z.unknown()).describe("A full PlanRequest / PlanRequestWithTelemetry JSON object."),
+        request: z
+          .record(z.string(), z.unknown())
+          .describe("A full PlanRequest / PlanRequestWithTelemetry JSON object."),
         detail: z
           .enum(["summary", "full"])
           .optional()
-          .describe("'summary' (default) strips bulky map geometry; 'full' returns everything (may exceed client size limits)."),
+          .describe(
+            "'summary' (default) strips bulky map geometry; 'full' returns everything (may exceed client size limits).",
+          ),
       },
     },
-    handler(async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
-      const result = await getClient().plan(request);
-      return withViewUrl(detail === "full" ? result : slimPlan(result));
-    }),
+    handler(
+      async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
+        const result = await getClient().plan(request);
+        return withViewUrl(detail === "full" ? result : slimPlan(result));
+      },
+    ),
   );
 
   server.registerTool(
@@ -504,14 +627,21 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       description:
         "Re-optimise a route mid-trip from the latest position and state of charge (POST /route/refresh). Takes a raw RefreshRequestWithTelemetry body (route calibration + telemetry data points) as documented in the v2 spec. Returns the summarised refreshed plan.",
       inputSchema: {
-        request: z.record(z.string(), z.unknown()).describe("A RefreshRequestWithTelemetry JSON object (route + telemetry/calibration)."),
-        detail: z.enum(["summary", "full"]).optional().describe("'summary' (default) strips map geometry; 'full' returns everything."),
+        request: z
+          .record(z.string(), z.unknown())
+          .describe("A RefreshRequestWithTelemetry JSON object (route + telemetry/calibration)."),
+        detail: z
+          .enum(["summary", "full"])
+          .optional()
+          .describe("'summary' (default) strips map geometry; 'full' returns everything."),
       },
     },
-    handler(async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
-      const result = await getClient().refreshRoute(request);
-      return withViewUrl(detail === "full" ? result : slimPlan(result));
-    }),
+    handler(
+      async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
+        const result = await getClient().refreshRoute(request);
+        return withViewUrl(detail === "full" ? result : slimPlan(result));
+      },
+    ),
   );
 
   server.registerTool(
@@ -525,9 +655,7 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
           .array(destinationSchema)
           .min(2)
           .describe("Ordered stops; first = origin, last = final destination. At least 2."),
-        typecode: z
-          .string()
-          .describe("Vehicle model typecode (use abrp_find_vehicle to look it up)."),
+        typecode: z.string().describe("Vehicle model typecode (use abrp_find_vehicle to look it up)."),
         maxDriveHoursPerDay: z
           .number()
           .min(1)
@@ -538,61 +666,78 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
           .string()
           .regex(/^\d{4}-\d{2}-\d{2}$/)
           .optional()
-          .describe("Date of the first day's departure, YYYY-MM-DD. If set, each day gets a date and clock times."),
+          .describe(
+            "Date of the first day's departure, YYYY-MM-DD. If set, each day gets a date and clock times.",
+          ),
         dailyDepartTime: z
           .string()
           .regex(/^\d{2}:\d{2}$/)
           .optional()
-          .describe("Local time you set off each morning, HH:MM (default 09:00). Times are treated as local/CET."),
-        currentSocFrac: z.number().min(0).max(1).optional().describe("Starting state of charge 0–1 (default 0.9)."),
+          .describe(
+            "Local time you set off each morning, HH:MM (default 09:00). Times are treated as local/CET.",
+          ),
+        currentSocFrac: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe("Starting state of charge 0–1 (default 0.9)."),
         configuration: z
           .string()
           .optional()
-          .describe("Consumption modifier for towing/load, e.g. 'TRAILER-SMALL', 'TRAILER-MEDIUM', 'TRAILER-LARGE' for a caravan."),
+          .describe(
+            "Consumption modifier for towing/load, e.g. 'TRAILER-SMALL', 'TRAILER-MEDIUM', 'TRAILER-LARGE' for a caravan.",
+          ),
         charging: chargingSchema.optional(),
         speed: speedSchema.optional(),
         avoid: avoidSchema.optional(),
         weather: weatherSchema.optional(),
-        currency: z.string().length(3).optional().describe("3-letter currency for charging costs, e.g. 'DKK'."),
+        currency: z
+          .string()
+          .length(3)
+          .optional()
+          .describe("3-letter currency for charging costs, e.g. 'DKK'."),
         units: z.enum(["METRIC", "IMPERIAL"]).optional().describe("Units in the response (default METRIC)."),
       },
     },
-    handler(async (args: {
-      destinations: DestinationInput[];
-      typecode: string;
-      maxDriveHoursPerDay?: number;
-      departDate?: string;
-      dailyDepartTime?: string;
-      currentSocFrac?: number;
-      configuration?: string;
-      charging?: Record<string, unknown>;
-      speed?: Record<string, unknown>;
-      avoid?: Record<string, unknown>;
-      weather?: Record<string, unknown>;
-      currency?: string;
-      units?: "METRIC" | "IMPERIAL";
-    }) => {
-      const resultOptions = toResultOptions(args);
-      const request: Record<string, unknown> = {
-        destinations: args.destinations.map(toApiDestination),
-        vehicle: {
-          identifier: { type: "TYPECODE", value: args.typecode },
-          ...(args.currentSocFrac !== undefined ? { currentSocFrac: args.currentSocFrac } : {}),
-          ...(args.configuration ? { configuration: args.configuration } : {}),
-        },
-        ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
-        ...(args.speed ? { speed: args.speed } : {}),
-        ...(args.avoid ? { avoid: args.avoid } : {}),
-        ...(args.weather ? { weather: args.weather } : {}),
-        ...(resultOptions ? { resultOptions } : {}),
-      };
-      const result = await getClient().plan(request);
-      return summarizeTrip(result, {
-        maxDriveHoursPerDay: args.maxDriveHoursPerDay ?? 8,
-        departDate: args.departDate,
-        dailyDepartTime: args.dailyDepartTime ?? "09:00",
-      });
-    }),
+    handler(
+      async (args: {
+        destinations: DestinationInput[];
+        typecode: string;
+        maxDriveHoursPerDay?: number;
+        departDate?: string;
+        dailyDepartTime?: string;
+        currentSocFrac?: number;
+        configuration?: string;
+        charging?: Record<string, unknown>;
+        speed?: Record<string, unknown>;
+        avoid?: Record<string, unknown>;
+        weather?: Record<string, unknown>;
+        currency?: string;
+        units?: "METRIC" | "IMPERIAL";
+      }) => {
+        const resultOptions = toResultOptions(args);
+        const request: Record<string, unknown> = {
+          destinations: args.destinations.map(toApiDestination),
+          vehicle: {
+            identifier: { type: "TYPECODE", value: args.typecode },
+            ...(args.currentSocFrac !== undefined ? { currentSocFrac: args.currentSocFrac } : {}),
+            ...(args.configuration ? { configuration: args.configuration } : {}),
+          },
+          ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
+          ...(args.speed ? { speed: args.speed } : {}),
+          ...(args.avoid ? { avoid: args.avoid } : {}),
+          ...(args.weather ? { weather: args.weather } : {}),
+          ...(resultOptions ? { resultOptions } : {}),
+        };
+        const result = await getClient().plan(request);
+        return summarizeTrip(result, {
+          maxDriveHoursPerDay: args.maxDriveHoursPerDay ?? 8,
+          departDate: args.departDate,
+          dailyDepartTime: args.dailyDepartTime ?? "09:00",
+        });
+      },
+    ),
   );
 
   // --- Vehicles & models ---------------------------------------------------
@@ -605,7 +750,9 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       inputSchema: {
         query: z
           .string()
-          .describe("Free-text search across model names, e.g. 'model y standard range', 'id.4 77', 'rivian r1s'."),
+          .describe(
+            "Free-text search across model names, e.g. 'model y standard range', 'id.4 77', 'rivian r1s'.",
+          ),
         limit: z.number().int().min(1).max(50).optional().describe("Max matches to return (default 15)."),
       },
     },
@@ -630,10 +777,16 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       description:
         "List the vehicles on the authenticated ABRP account and their typecodes. Requires a user session (X-ABRP-SESSION).",
       inputSchema: {
-        countryCode3: z.string().length(3).optional().describe("Optional ISO 3166-1 alpha-3 country code to localize results, e.g. 'SWE'."),
+        countryCode3: z
+          .string()
+          .length(3)
+          .optional()
+          .describe("Optional ISO 3166-1 alpha-3 country code to localize results, e.g. 'SWE'."),
       },
     },
-    handler(async ({ countryCode3 }: { countryCode3?: string }) => getClient().listVehicles({ countryCode3 })),
+    handler(async ({ countryCode3 }: { countryCode3?: string }) =>
+      getClient().listVehicles({ countryCode3 }),
+    ),
   );
 
   server.registerTool(
@@ -646,15 +799,19 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         typecode: z.string().describe("Vehicle model typecode, e.g. 'rivian:r1s:21:135'."),
         chargerId: z.number().int().optional().describe("ABRP charger id to evaluate the curve against."),
         startSoc: z.number().optional().describe("Starting state of charge in percent (0–100), e.g. 10."),
-        calibrationState: z.string().optional().describe("Calibration state from a prior plan/refresh; may affect charge speed."),
+        calibrationState: z
+          .string()
+          .optional()
+          .describe("Calibration state from a prior plan/refresh; may affect charge speed."),
       },
     },
-    handler(async (args: { typecode: string; chargerId?: number; startSoc?: number; calibrationState?: string }) =>
-      getClient().chargeCurve(args.typecode, {
-        chargerId: args.chargerId,
-        startSoc: args.startSoc,
-        calibrationState: args.calibrationState,
-      }),
+    handler(
+      async (args: { typecode: string; chargerId?: number; startSoc?: number; calibrationState?: string }) =>
+        getClient().chargeCurve(args.typecode, {
+          chargerId: args.chargerId,
+          startSoc: args.startSoc,
+          calibrationState: args.calibrationState,
+        }),
     ),
   );
 
@@ -672,19 +829,20 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         vehicleConfigKey: z.string().optional().describe("Vehicle configuration key (advanced)."),
       },
     },
-    handler(async (args: {
-      typecode: string;
-      extraMassKg?: number;
-      manualRefCons?: number;
-      vehicleConfigType?: string;
-      vehicleConfigKey?: string;
-    }) =>
-      getClient().refConsByTypecode(args.typecode, {
-        extraMassKg: args.extraMassKg,
-        manualRefCons: args.manualRefCons,
-        vehicleConfigType: args.vehicleConfigType,
-        vehicleConfigKey: args.vehicleConfigKey,
-      }),
+    handler(
+      async (args: {
+        typecode: string;
+        extraMassKg?: number;
+        manualRefCons?: number;
+        vehicleConfigType?: string;
+        vehicleConfigKey?: string;
+      }) =>
+        getClient().refConsByTypecode(args.typecode, {
+          extraMassKg: args.extraMassKg,
+          manualRefCons: args.manualRefCons,
+          vehicleConfigType: args.vehicleConfigType,
+          vehicleConfigKey: args.vehicleConfigKey,
+        }),
     ),
   );
 
@@ -696,7 +854,9 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       description:
         "Create a range plot: the set of points reachable from a location for a given vehicle and conditions (alpha). Provide a full RangeRequest body.",
       inputSchema: {
-        request: z.record(z.string(), z.unknown()).describe("A RangeRequest JSON object (location + vehicle + conditions)."),
+        request: z
+          .record(z.string(), z.unknown())
+          .describe("A RangeRequest JSON object (location + vehicle + conditions)."),
       },
     },
     handler(async ({ request }: { request: Record<string, unknown> }) => getClient().range(request)),
@@ -729,32 +889,41 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
     "abrp_search_chargers",
     {
       title: "Search chargers near a point",
-      description:
-        "Find chargers around a coordinate, sorted by power, distance, or a weighted combination.",
+      description: "Find chargers around a coordinate, sorted by power, distance, or a weighted combination.",
       inputSchema: {
         lat: z.number().describe("Latitude of the search center."),
         long: z.number().describe("Longitude of the search center."),
-        maxDistance: z.number().int().min(1).max(500000).optional().describe("Max distance in meters (default 50000)."),
+        maxDistance: z
+          .number()
+          .int()
+          .min(1)
+          .max(500000)
+          .optional()
+          .describe("Max distance in meters (default 50000)."),
         sortBy: z
           .enum(["POWER", "DISTANCE", "POWER_AND_DISTANCE"])
           .optional()
           .describe("Sort/selection method (default POWER_AND_DISTANCE)."),
-        extra: z.record(z.string(), z.unknown()).optional().describe("Additional GeoSearchParams (filters) merged verbatim."),
+        extra: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Additional GeoSearchParams (filters) merged verbatim."),
       },
     },
-    handler(async (args: {
-      lat: number;
-      long: number;
-      maxDistance?: number;
-      sortBy?: "POWER" | "DISTANCE" | "POWER_AND_DISTANCE";
-      extra?: Record<string, unknown>;
-    }) =>
-      getClient().searchChargersGeopoint({
-        location: { lat: args.lat, long: args.long },
-        maxDistance: args.maxDistance ?? 50000,
-        sortBy: args.sortBy ?? "POWER_AND_DISTANCE",
-        ...(args.extra ?? {}),
-      }),
+    handler(
+      async (args: {
+        lat: number;
+        long: number;
+        maxDistance?: number;
+        sortBy?: "POWER" | "DISTANCE" | "POWER_AND_DISTANCE";
+        extra?: Record<string, unknown>;
+      }) =>
+        getClient().searchChargersGeopoint({
+          location: { lat: args.lat, long: args.long },
+          maxDistance: args.maxDistance ?? 50000,
+          sortBy: args.sortBy ?? "POWER_AND_DISTANCE",
+          ...(args.extra ?? {}),
+        }),
     ),
   );
 
@@ -789,8 +958,14 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         lon: z.number().describe("Longitude."),
         car_model: z.string().optional().describe("Vehicle typecode, e.g. 'rivian:r1s:21:135'."),
         speed: z.number().optional().describe("Speed in km/h."),
-        is_charging: z.union([z.literal(0), z.literal(1)]).optional().describe("1 if charging, else 0."),
-        is_dcfc: z.union([z.literal(0), z.literal(1)]).optional().describe("1 if DC fast charging."),
+        is_charging: z
+          .union([z.literal(0), z.literal(1)])
+          .optional()
+          .describe("1 if charging, else 0."),
+        is_dcfc: z
+          .union([z.literal(0), z.literal(1)])
+          .optional()
+          .describe("1 if DC fast charging."),
         power: z.number().optional().describe("Battery power in kW (negative = charging)."),
         voltage: z.number().optional().describe("Battery voltage in V."),
         current: z.number().optional().describe("Battery current in A."),
@@ -802,7 +977,10 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         odometer: z.number().optional().describe("Odometer in km."),
         capacity: z.number().optional().describe("Usable battery capacity in kWh."),
         kwh_charged: z.number().optional().describe("Energy added this session in kWh."),
-        extra: z.record(z.string(), z.unknown()).optional().describe("Any additional tlm fields merged verbatim."),
+        extra: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Any additional tlm fields merged verbatim."),
       },
     },
     handler(async (args: Record<string, unknown>) => {

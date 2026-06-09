@@ -21,6 +21,32 @@
 export const DEFAULT_V2_BASE_URL = "https://api.iternio.com/2";
 export const DEFAULT_V1_BASE_URL = "https://api.iternio.com/1";
 
+/** Timeout for fast/free endpoints. /plan and friends get a longer budget. */
+const DEFAULT_TIMEOUT_MS = 12_000;
+const PLAN_TIMEOUT_MS = 30_000;
+
+/** fetch() with a hard timeout, surfaced as a clean AbrpError instead of a hang. */
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  ms: number,
+  label: string,
+): Promise<Awaited<ReturnType<typeof fetch>>> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+  } catch (e) {
+    const name = e instanceof Error ? e.name : "";
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new AbrpError(`ABRP API ${label} timed out after ${ms} ms`, 504, { message: "upstream_timeout" });
+    }
+    throw new AbrpError(
+      `ABRP API ${label} network error: ${e instanceof Error ? e.message : String(e)}`,
+      502,
+      { message: "upstream_unreachable" },
+    );
+  }
+}
+
 export class AbrpError extends Error {
   constructor(
     message: string,
@@ -89,7 +115,7 @@ export class AbrpClient {
   private async v2<T = unknown>(
     method: "GET" | "POST",
     path: string,
-    opts: { query?: Query; json?: unknown; session?: boolean } = {},
+    opts: { query?: Query; json?: unknown; session?: boolean; timeoutMs?: number } = {},
   ): Promise<T> {
     const headers: Record<string, string> = {
       "X-API-KEY": this.requireApiKey(),
@@ -106,25 +132,31 @@ export class AbrpClient {
     }
 
     const url = buildUrl(this.v2BaseUrl, path, opts.query);
-    const res = await fetch(url, { method, headers, body });
-    return parseResponse<T>(res, `${method} ${path}`);
+    const label = `${method} ${path}`;
+    const res = await fetchWithTimeout(
+      url,
+      { method, headers, body },
+      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      label,
+    );
+    return parseResponse<T>(res, label);
   }
 
   // --- v2: planning --------------------------------------------------------
 
   /** Create an EV route plan (billed per successful plan). Body = PlanRequest. */
   plan(request: unknown) {
-    return this.v2("POST", "/plan", { json: request });
+    return this.v2("POST", "/plan", { json: request, timeoutMs: PLAN_TIMEOUT_MS });
   }
 
   /** Re-optimise an in-progress route given fresh telemetry. */
   refreshRoute(request: unknown) {
-    return this.v2("POST", "/route/refresh", { json: request });
+    return this.v2("POST", "/route/refresh", { json: request, timeoutMs: PLAN_TIMEOUT_MS });
   }
 
   /** Range plot: reachable points from a location (alpha). Body = RangeRequest. */
   range(request: unknown) {
-    return this.v2("POST", "/range", { json: request });
+    return this.v2("POST", "/range", { json: request, timeoutMs: PLAN_TIMEOUT_MS });
   }
 
   // --- v2: vehicles --------------------------------------------------------
@@ -197,11 +229,16 @@ export class AbrpClient {
       token: this.userToken,
       tlm: JSON.stringify(tlm),
     });
-    const res = await fetch(`${this.v1BaseUrl}/tlm/send`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body: form.toString(),
-    });
+    const res = await fetchWithTimeout(
+      `${this.v1BaseUrl}/tlm/send`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+        body: form.toString(),
+      },
+      DEFAULT_TIMEOUT_MS,
+      "POST /1/tlm/send",
+    );
     return parseResponse(res, "POST /1/tlm/send");
   }
 
@@ -212,14 +249,14 @@ export class AbrpClient {
    */
   async listCarModels(): Promise<Array<{ name: string; typecode: string }>> {
     const apiKey = this.requireApiKey();
-    const res = await fetch(
+    const res = await fetchWithTimeout(
       `${this.v1BaseUrl}/tlm/get_carmodels_list?api_key=${encodeURIComponent(apiKey)}`,
       { headers: { Accept: "application/json" } },
+      DEFAULT_TIMEOUT_MS,
+      "GET /1/tlm/get_carmodels_list",
     );
     const data = await parseResponse<unknown>(res, "GET /1/tlm/get_carmodels_list");
-    const arr = Array.isArray(data)
-      ? data
-      : ((data as { result?: unknown })?.result as unknown);
+    const arr = Array.isArray(data) ? data : ((data as { result?: unknown })?.result as unknown);
     if (!Array.isArray(arr)) return [];
     // Each entry is a single-key object: { "<display name>": "<typecode>" }.
     return arr.flatMap((entry) =>
@@ -260,6 +297,15 @@ async function parseResponse<T>(res: Awaited<ReturnType<typeof fetch>>, label: s
       parsed = JSON.parse(text);
     } catch {
       // keep raw text
+    }
+    // Surface rate-limit info so the caller/LLM can back off.
+    if (res.status === 429) {
+      const retryAfter = res.headers.get("retry-after");
+      throw new AbrpError(
+        `ABRP API ${label} rate-limited (HTTP 429)${retryAfter ? `, retry after ${retryAfter}s` : ""}`,
+        429,
+        { message: "rate_limited", retryAfter, body: parsed },
+      );
     }
     throw new AbrpError(`ABRP API ${label} failed with HTTP ${res.status}`, res.status, parsed);
   }
