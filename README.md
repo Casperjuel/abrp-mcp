@@ -34,6 +34,8 @@ access token). Point any OAuth-capable MCP client at the `/mcp` URL, or self-hos
 | `abrp_plan_route` | Plan an EV route with charging stops (friendly inputs) | API key |
 | `abrp_plan_trip` | Plan a long route split into dated daily legs (max-hours/day, daily start time) + overnight stops | API key |
 | `abrp_plan_raw` | Plan with a full raw `PlanRequest` body | API key |
+| `abrp_refresh_route` | Re-optimise an in-progress route from live position/SoC | API key |
+| `abrp_search_networks` | Find charging-network ids (for network preferences) | API key |
 | `abrp_list_vehicles` | List vehicles on your ABRP account + typecodes | API key + **session** |
 | `abrp_get_charge_curve` | Charge curve (power vs SoC) for a model at a charger | API key |
 | `abrp_get_reference_consumption` | Reference consumption (Wh/km) for a model | API key |
@@ -52,6 +54,11 @@ the result in the ABRP web app or mobile app.
 a caravan's extra consumption, and bias stops toward amenities with
 `charging.preferredFeatures` — `TRAILER_FRIENDLY` (pull-through), `HAS_PLAYGROUND`,
 `HAS_OPEN_RESTROOMS`, `DOG_FRIENDLY`, `PLUG_AND_CHARGE` — or free-text `charging.preferredTags`.
+
+**Conditions & preferences.** Plans also accept `weather` (`SEASONAL` / `REAL_TIME` / `MANUAL` with
+°C, wind, road conditions — strongly affects range), `traffic` (`REAL_TIME`, premium),
+`currency` + `units` for the output, `alternatives: true` to get the 2–3 alternative routes, and
+`charging.networks` to prefer/exclude specific networks (look up ids with `abrp_search_networks`).
 
 ## Getting an API key
 

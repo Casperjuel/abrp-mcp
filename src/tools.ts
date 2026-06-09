@@ -292,15 +292,27 @@ const chargingSchema = z
       .array(z.string())
       .optional()
       .describe("Bias toward chargers carrying these free-text tags (e.g. for food/restaurant nearby), soft preference."),
+    networks: z
+      .array(
+        z.object({
+          id: z.number().int().describe("Network id (look up with abrp_search_networks)."),
+          preference: z
+            .enum(["EXCLUDE", "DISLIKE", "NO_PREFERENCE", "PREFER", "PREFER_STRONGLY", "EXCLUSIVE"])
+            .describe("EXCLUSIVE = plan only on these networks; EXCLUDE = never use."),
+        }),
+      )
+      .optional()
+      .describe("Per-network preferences, e.g. only Ionity/Tesla, or avoid a network. Resolve ids via abrp_search_networks."),
   })
   .describe("Charging constraints/preferences.");
 
 /** Map the friendly charging schema onto the API's ChargingOptions shape. */
 function toApiCharging(charging?: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!charging) return undefined;
-  const { preferredFeatures, preferredTags, ...rest } = charging as {
+  const { preferredFeatures, preferredTags, networks, ...rest } = charging as {
     preferredFeatures?: string[];
     preferredTags?: string[];
+    networks?: Array<{ id: number; preference: string }>;
   } & Record<string, unknown>;
   return {
     ...rest,
@@ -310,7 +322,33 @@ function toApiCharging(charging?: Record<string, unknown>): Record<string, unkno
     ...(preferredTags?.length
       ? { tagPreferences: preferredTags.map((tag) => ({ tag, preference: "PREFER" })) }
       : {}),
+    ...(networks?.length ? { networkPreferences: networks } : {}),
   };
+}
+
+const weatherSchema = z
+  .object({
+    type: z
+      .enum(["SEASONAL", "REAL_TIME", "MANUAL"])
+      .describe("SEASONAL = seasonal average (default); REAL_TIME = live conditions; MANUAL = set values below."),
+    temperatureC: z.number().optional().describe("MANUAL: outside temperature in °C (affects consumption)."),
+    roadConditions: z.enum(["NORMAL", "RAIN", "HEAVY_RAIN"]).optional().describe("MANUAL: road conditions."),
+    windSpeedMs: z.number().min(0).optional().describe("MANUAL: wind speed in m/s."),
+    windDirection: z.enum(["HEAD", "TAIL"]).optional().describe("MANUAL: head- or tail-wind."),
+  })
+  .describe("Weather assumptions — strongly affects range (cold/heat/wind).");
+
+/** Build the API resultOptions block from friendly currency/units/alternatives. */
+function toResultOptions(opts: {
+  currency?: string;
+  units?: "METRIC" | "IMPERIAL";
+  alternatives?: boolean;
+}): Record<string, unknown> | undefined {
+  const r: Record<string, unknown> = {};
+  if (opts.currency) r.currency = opts.currency;
+  if (opts.units) r.unitSystem = opts.units;
+  if (opts.alternatives) r.alternatives = { type: "ROUTES" };
+  return Object.keys(r).length ? r : undefined;
 }
 
 const speedSchema = z
@@ -381,10 +419,15 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         charging: chargingSchema.optional(),
         speed: speedSchema.optional(),
         avoid: avoidSchema.optional(),
+        weather: weatherSchema.optional(),
+        traffic: z.enum(["NO_TRAFFIC", "REAL_TIME"]).optional().describe("REAL_TIME uses live traffic (premium on the key)."),
+        currency: z.string().length(3).optional().describe("3-letter currency for charging costs, e.g. 'DKK', 'EUR'."),
+        units: z.enum(["METRIC", "IMPERIAL"]).optional().describe("Units in the response (default METRIC)."),
+        alternatives: z.boolean().optional().describe("Return up to ~3 alternative routes instead of just the best one."),
         extra: z
           .record(z.string(), z.unknown())
           .optional()
-          .describe("Advanced: extra top-level PlanRequest fields merged verbatim (resultOptions, traffic, weather, clientContext…)."),
+          .describe("Advanced: extra top-level PlanRequest fields merged verbatim (clientContext, etc.)."),
         detail: z
           .enum(["summary", "full"])
           .optional()
@@ -403,9 +446,15 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       charging?: Record<string, unknown>;
       speed?: Record<string, unknown>;
       avoid?: Record<string, unknown>;
+      weather?: Record<string, unknown>;
+      traffic?: string;
+      currency?: string;
+      units?: "METRIC" | "IMPERIAL";
+      alternatives?: boolean;
       extra?: Record<string, unknown>;
       detail?: "summary" | "full";
     }) => {
+      const resultOptions = toResultOptions(args);
       const request: Record<string, unknown> = {
         destinations: args.destinations.map(toApiDestination),
         vehicle: {
@@ -418,6 +467,9 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
         ...(args.speed ? { speed: args.speed } : {}),
         ...(args.avoid ? { avoid: args.avoid } : {}),
+        ...(args.weather ? { weather: args.weather } : {}),
+        ...(args.traffic ? { traffic: args.traffic } : {}),
+        ...(resultOptions ? { resultOptions } : {}),
         ...(args.extra ?? {}),
       };
       const result = await getClient().plan(request);
@@ -441,6 +493,23 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
     },
     handler(async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
       const result = await getClient().plan(request);
+      return withViewUrl(detail === "full" ? result : slimPlan(result));
+    }),
+  );
+
+  server.registerTool(
+    "abrp_refresh_route",
+    {
+      title: "Refresh an in-progress route",
+      description:
+        "Re-optimise a route mid-trip from the latest position and state of charge (POST /route/refresh). Takes a raw RefreshRequestWithTelemetry body (route calibration + telemetry data points) as documented in the v2 spec. Returns the summarised refreshed plan.",
+      inputSchema: {
+        request: z.record(z.string(), z.unknown()).describe("A RefreshRequestWithTelemetry JSON object (route + telemetry/calibration)."),
+        detail: z.enum(["summary", "full"]).optional().describe("'summary' (default) strips map geometry; 'full' returns everything."),
+      },
+    },
+    handler(async ({ request, detail }: { request: Record<string, unknown>; detail?: "summary" | "full" }) => {
+      const result = await getClient().refreshRoute(request);
       return withViewUrl(detail === "full" ? result : slimPlan(result));
     }),
   );
@@ -483,6 +552,9 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         charging: chargingSchema.optional(),
         speed: speedSchema.optional(),
         avoid: avoidSchema.optional(),
+        weather: weatherSchema.optional(),
+        currency: z.string().length(3).optional().describe("3-letter currency for charging costs, e.g. 'DKK'."),
+        units: z.enum(["METRIC", "IMPERIAL"]).optional().describe("Units in the response (default METRIC)."),
       },
     },
     handler(async (args: {
@@ -496,7 +568,11 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
       charging?: Record<string, unknown>;
       speed?: Record<string, unknown>;
       avoid?: Record<string, unknown>;
+      weather?: Record<string, unknown>;
+      currency?: string;
+      units?: "METRIC" | "IMPERIAL";
     }) => {
+      const resultOptions = toResultOptions(args);
       const request: Record<string, unknown> = {
         destinations: args.destinations.map(toApiDestination),
         vehicle: {
@@ -507,6 +583,8 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         ...(args.charging ? { charging: toApiCharging(args.charging) } : {}),
         ...(args.speed ? { speed: args.speed } : {}),
         ...(args.avoid ? { avoid: args.avoid } : {}),
+        ...(args.weather ? { weather: args.weather } : {}),
+        ...(resultOptions ? { resultOptions } : {}),
       };
       const result = await getClient().plan(request);
       return summarizeTrip(result, {
@@ -677,6 +755,23 @@ export function registerAbrpTools(server: McpServer, getClient: () => AbrpClient
         sortBy: args.sortBy ?? "POWER_AND_DISTANCE",
         ...(args.extra ?? {}),
       }),
+    ),
+  );
+
+  // --- Networks ------------------------------------------------------------
+  server.registerTool(
+    "abrp_search_networks",
+    {
+      title: "Search charging networks",
+      description:
+        "Search charging networks by name to get their ids — use the ids in a plan's `charging.networks` to prefer or exclude networks (e.g. Ionity-only, avoid X).",
+      inputSchema: {
+        name: z.string().describe("Network name to match, e.g. 'ionity', 'tesla', 'fastned'."),
+        limit: z.number().int().min(1).max(100).optional().describe("Max networks to return (default 10)."),
+      },
+    },
+    handler(async ({ name, limit }: { name: string; limit?: number }) =>
+      getClient().searchNetworks(name, limit ?? 10),
     ),
   );
 

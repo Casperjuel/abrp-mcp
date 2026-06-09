@@ -161,6 +161,11 @@ export class AbrpClient {
     return this.v2("GET", `/charger/${encodeURIComponent(String(chargerId))}`);
   }
 
+  /** Search charging networks by name (for networkPreferences). Returns {id,name}. */
+  searchNetworks(name: string, limit = 10) {
+    return this.v2("POST", "/network/_search", { json: { filter: { name }, limit } });
+  }
+
   /** Search chargers around a point. */
   searchChargersGeopoint(body: {
     location: { lat: number; long: number };
